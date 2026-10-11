@@ -20,16 +20,19 @@ Depois é só abrir `http://localhost:8000` no navegador.
 
 | Tecla | Ação |
 |---|---|
-| Clique | mover / atacar / falar |
+| Clique | mover / atacar (combo de 3 golpes) / falar |
+| Shift + clique | atacar parado na direção do mouse |
+| Botão direito ou R | golpe pesado com as duas mãos (dano em área) |
+| Espaço | esquiva (rolamento com invencibilidade) |
 | WASD / setas | andar |
-| Espaço | golpe |
 | 1 | beber poção |
 | F | falar |
-| Q / E, botão direito arrastando | girar câmera |
+| Q / E, botão do meio arrastando | girar câmera |
 | Roda do mouse | zoom |
 | T | liga/desliga o modo ASCII |
 | `[` `]` | tamanho dos caracteres ASCII |
 | G | densidade da grama |
+| M | liga/desliga o som |
 
 ## Estrutura
 
@@ -39,8 +42,11 @@ src/main.js       loop do jogo, entrada, combate, missões e HUD
 src/world.js      céu, terreno, água com reflexo, vila, ruínas, vegetação e partículas
 src/models.js     personagens: rig de juntas, peças e poses animadas
 src/terrain.js    relevo, pontos de interesse e colisão
-src/ascii.js      pós-processamento que converte a imagem em caracteres
+src/ascii.js      passe final: correção de cor do modo 3D e conversão para caracteres
 src/geo.js        materiais, vento, recorte de oclusão e o Batch de geometria estática
+src/fx.js         faíscas, anéis de impacto, rastro da espada e ossos que se despedaçam
+src/audio.js      efeitos sonoros sintetizados com WebAudio (sem arquivos)
+src/post.js       bloom
 src/util.js       aleatório com semente, ruído e interpolação
 ```
 

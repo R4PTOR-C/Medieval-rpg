@@ -5,7 +5,9 @@ import { RUINS, FIRE, SPAWN, ELDER, heightAt, groundY, canStand, moveEntity, col
 import { buildWorld } from './world.js';
 import { cutout } from './geo.js';
 import { createAscii } from './ascii.js';
-import { makeKnight, makeSkeleton, makeWolf, makeElder, poseHumanoid, poseWolf, poseElder, poseKneel, animateCape } from './models.js';
+import { makeKnight, makeSkeleton, makeWolf, makeElder, poseHumanoid, poseWolf, poseElder, poseKneel, animateCape, ATTACKS } from './models.js';
+import { createFx } from './fx.js';
+import { initAudio, toggleMute, sfx } from './audio.js';
 import { createBloom } from './post.js';
 
 // =====================================================================
@@ -31,13 +33,16 @@ const bloom = createBloom(innerWidth, innerHeight);
 const ascii = createAscii(sceneRT, NEAR, FAR, bloom.texture);
 
 const world = buildWorld(scene);
+const fx = createFx(scene);
+const trailA = new THREE.Vector3(), trailB = new THREE.Vector3();
 
 // =====================================================================
 // entidades
 // =====================================================================
 const player = {
   name: 'Sir Roland', x: SPAWN.x, z: SPAWN.z, rot: 0.45, hp: 100, maxHp: 100, level: 1, xp: 0,
-  gold: 0, potions: 3, dmg: [10, 16], atkCd: 0, swing: 0, phase: 0, moveAmt: 0,
+  gold: 0, potions: 3, dmg: [10, 16], phase: 0, moveAmt: 0,
+  act: null, combo: 0, comboTimer: 0, queued: null, heavyCd: 0, dodgeCd: 0, invuln: 0, react: 0, kvx: 0, kvz: 0, inDir: null,
   moveTarget: null, attackTarget: null, talkPending: false, dead: false, deadT: 0, rig: makeKnight(),
 };
 scene.add(player.rig.root);
@@ -51,16 +56,17 @@ scene.add(elder.rig.root);
 colliders.push({ x: elder.x, z: elder.z, r: 0.45 });
 
 const TYPES = {
-  skeleton: { name: 'Esqueleto', hp: 42, dmg: [5, 9], speed: 2.4, xp: 26, gold: [2, 8], aggro: 10, reach: 1.35, cd: 1.3, respawn: 30, make: () => makeSkeleton(), humanoid: true },
-  wolf: { name: 'Lobo', hp: 30, dmg: [4, 7], speed: 4.3, xp: 18, gold: [0, 2], aggro: 12, reach: 1.45, cd: 1.0, respawn: 30, make: makeWolf },
-  lord: { name: 'Lorde Esqueleto', hp: 260, dmg: [13, 20], speed: 2.7, xp: 220, gold: [60, 100], aggro: 11, reach: 2.1, cd: 1.6, respawn: 120, make: () => makeSkeleton(true), humanoid: true, radius: 0.7, barH: 3.8 },
+  skeleton: { name: 'Esqueleto', hp: 42, dmg: [5, 9], speed: 2.4, xp: 26, gold: [2, 8], aggro: 10, reach: 1.35, cd: 1.6, respawn: 30, make: () => makeSkeleton(), humanoid: true, atkDur: 0.85, atkHit: 0.5 },
+  wolf: { name: 'Lobo', hp: 30, dmg: [4, 7], speed: 4.3, xp: 18, gold: [0, 2], aggro: 12, reach: 1.45, cd: 1.2, respawn: 30, make: makeWolf, atkDur: 0.6, atkHit: 0.45 },
+  lord: { name: 'Lorde Esqueleto', hp: 260, dmg: [13, 20], speed: 2.7, xp: 220, gold: [60, 100], aggro: 11, reach: 2.1, cd: 1.6, respawn: 120, make: () => makeSkeleton(true), humanoid: true, radius: 0.7, barH: 3.8, atkDur: 1.2, atkHit: 0.55, poise: 0.8 },
 };
 const enemies = [];
 function spawnEnemy(type, x, z) {
   for (let i = 0; i < 40 && !canStand(x, z, 0.5); i++) { x += rr(-2, 2); z += rr(-2, 2); }
   const t = TYPES[type];
-  const e = { type, t, x, z, sx: x, sz: z, rot: rr(0, 6), hp: t.hp, state: 'idle', cd: 0, swing: 0, phase: 0, moveAmt: 0,
-    wander: null, wanderT: rr(1, 4), dead: false, deadT: 0, hit: 0, rig: t.make(), bar: null };
+  const e = { type, t, x, z, sx: x, sz: z, rot: rr(0, 6), hp: t.hp, state: 'idle', cd: 0, phase: 0, moveAmt: 0,
+    wander: null, wanderT: rr(1, 4), dead: false, deadT: 0, rig: t.make(), bar: null,
+    atk: null, react: 0, reactSide: 1, flash: 0, kvx: 0, kvz: 0, shattered: false };
   scene.add(e.rig.root);
   enemies.push(e); return e;
 }
@@ -81,6 +87,7 @@ function log(text, cls = '') {
   while (logLines.length > 7) logLines.shift();
   $('log').innerHTML = logLines.join('\n');
 }
+const cdBar = (cd, max) => cd > 0 ? `<span class="c-dim">[${bar(max - cd, max, 6)}]</span>` : '<span class="c-ok">[pronto]</span>';
 const bar = (v, max, n) => { const f = Math.round(clamp(v / max, 0, 1) * n); return '#'.repeat(f) + '-'.repeat(n - f); };
 function updateHud() {
   const p = player;
@@ -88,7 +95,8 @@ function updateHud() {
     `<span class="c-acc">${p.name.toUpperCase()}</span>  ·  NV ${p.level}\n` +
     `HP <span class="c-hp">[${bar(p.hp, p.maxHp, 18)}]</span> ${Math.ceil(p.hp)}/${p.maxHp}\n` +
     `XP <span class="c-xp">[${bar(p.xp, xpNeeded(), 18)}]</span> ${p.xp}/${xpNeeded()}\n` +
-    `Ouro <span class="c-acc">${p.gold}</span>   Poções <span class="c-hp">${p.potions}</span>   Dano ${p.dmg[0]}-${p.dmg[1]}`;
+    `Ouro <span class="c-acc">${p.gold}</span>   Poções <span class="c-hp">${p.potions}</span>   Dano ${p.dmg[0]}-${p.dmg[1]}\n` +
+    `Pesado ${cdBar(p.heavyCd, HEAVY_CD)}   Esquiva ${cdBar(p.dodgeCd, DODGE_CD)}`;
   const q = [
     '<span class="c-acc">MISSÃO</span>\nFale com o Ancião Aldric, junto ao poço da vila.',
     `<span class="c-acc">OS MORTOS INQUIETOS</span>\nDestrua esqueletos nas ruínas ao norte.\n<span class="c-ok">${Math.min(quest.kills, 6)}/6</span> esqueletos`,
@@ -101,9 +109,9 @@ function updateHud() {
 }
 
 const floats = [];
-function floatText(text, x, y, z, color = '#fff', size = 14) {
-  const el = document.createElement('div'); el.className = 'float'; el.textContent = text;
-  el.style.color = color; el.style.fontSize = size + 'px';
+// kind: dmg | crit | hurt | heal | gold | level | info (estilos no index.html)
+function floatText(text, x, y, z, kind = 'info') {
+  const el = document.createElement('div'); el.className = 'float f-' + kind; el.textContent = text;
   document.body.appendChild(el);
   floats.push({ el, pos: new THREE.Vector3(x + rr(-0.3, 0.3), y, z), t: 0 });
 }
@@ -146,32 +154,95 @@ function tryTalk() {
 }
 
 // =====================================================================
-// combate
+// "game feel": hitstop (congela), tremor de câmera, flash, câmera lenta
 // =====================================================================
+const feel = { hitstop: 0, trauma: 0, slowmo: 0, hurtFlash: 0 };
+const addTrauma = v => { feel.trauma = Math.min(1, feel.trauma + v); };
+const freeze = s => { feel.hitstop = Math.max(feel.hitstop, s); };
+
+// flash branco por inimigo: troca temporariamente os materiais do rig
+const FLASH = new THREE.MeshBasicMaterial({ color: 0xffffff });
+function setFlash(rig, on) {
+  rig.root.traverse(o => {
+    if (!o.isMesh) return;
+    if (on) { if (!o.userData.baseMat) o.userData.baseMat = o.material; o.material = FLASH; }
+    else if (o.userData.baseMat) o.material = o.userData.baseMat;
+  });
+}
+
 function gainXp(n) {
   player.xp += n;
   while (player.xp >= xpNeeded()) {
     player.xp -= xpNeeded(); player.level++;
     player.maxHp += 15; player.hp = player.maxHp; player.dmg[0] += 3; player.dmg[1] += 4;
-    floatText('NÍVEL ' + player.level + '!', player.x, groundY(player.x, player.z) + 2.8, player.z, '#8fd27a', 20);
+    floatText('NÍVEL ' + player.level + '!', player.x, groundY(player.x, player.z) + 2.8, player.z, 'level');
     log(`*** Você alcançou o nível ${player.level}! ***`, 'c-ok');
+    sfx.levelUp();
   }
 }
-function damageEnemy(e) {
-  let d = ri(player.dmg[0], player.dmg[1]);
-  const crit = rand() < 0.12; if (crit) d *= 2;
-  e.hp -= d; e.hit = 0.15;
+
+// ---------------------------------------------------------- golpes do herói
+const HIT_KIND = { skeleton: 'bone', lord: 'bone', wolf: 'flesh' };
+const ATK_PARAMS = {
+  slashA: { mul: 1, range: 2.4, arc: 0.15, knock: 3.5, stop: 0.06, shake: 0.22 },
+  slashB: { mul: 1, range: 2.4, arc: 0.15, knock: 3.5, stop: 0.06, shake: 0.22 },
+  finisher: { mul: 1.7, range: 2.6, arc: 0.45, knock: 7, stop: 0.1, shake: 0.4 },
+  heavy: { mul: 2.6, range: 3.1, arc: -1, knock: 10, stop: 0.14, shake: 0.7 },
+};
+const COMBO = ['slashA', 'slashB', 'finisher'];
+const HEAVY_CD = 3.5, DODGE_CD = 0.8;
+
+function damageEnemy(e, type, dir) {
+  const A = ATK_PARAMS[type];
+  let d = Math.round(ri(player.dmg[0], player.dmg[1]) * A.mul);
+  const crit = rand() < (type === 'heavy' ? 0.22 : 0.12); if (crit) d *= 2;
+  e.hp -= d;
+  e.flash = 0.09; setFlash(e.rig, true);
+  // reação: chefes (poise) só cambaleiam com golpes fortes
+  const poise = e.t.poise || 0;
+  if (type === 'heavy' || type === 'finisher' || poise === 0) {
+    e.react = 1; e.reactSide = rand() < 0.5 ? -1 : 1;
+    if (e.atk && e.atk.t < e.t.atkHit) { e.atk = null; e.cd = Math.max(e.cd, 0.7); }   // interrompe o ataque
+  }
+  const kb = A.knock * (1 - poise * 0.8) * (e.type === 'wolf' ? 1.3 : 1);
+  e.kvx += dir.x * kb; e.kvz += dir.z * kb;
   if (e.state === 'idle' || e.state === 'return') e.state = 'chase';
-  floatText(crit ? `CRÍTICO ${d}` : String(d), e.x, groundY(e.x, e.z) + 2.1, e.z, crit ? '#f0b450' : '#ffffff', crit ? 18 : 14);
-  if (e.hp <= 0) killEnemy(e);
+
+  const y = groundY(e.x, e.z) + (e.type === 'lord' ? 1.8 : 1.1), hx = e.x - dir.x * 0.3, hz = e.z - dir.z * 0.3;
+  if (HIT_KIND[e.type] === 'bone') {
+    fx.burst(hx, y, hz, { n: 10, color: 0xe8e0c8, speed: 3, life: 0.5, dir, spread: 0.8 });
+    fx.burst(hx, y, hz, { n: 8, color: 0x9fc0ff, speed: 6, up: 1, life: 0.25, grav: 4 });
+  } else {
+    fx.burst(hx, y - 0.4, hz, { n: 16, color: 0x8a0e0e, speed: 3.5, up: 2, life: 0.6, grav: 14, dir, spread: 0.9 });
+  }
+  fx.ring(hx, y, hz, { color: crit ? 0xffd070 : 0xbfd4ff, size: crit ? 2.4 : 1.5 });
+  sfx.hit(HIT_KIND[e.type], crit);
+  floatText(crit ? `${d}!` : String(d), e.x, y + 0.9, e.z, crit ? 'crit' : 'dmg');
+  if (e.hp <= 0) killEnemy(e, dir, type);
+  return crit;
 }
-function killEnemy(e) {
-  e.dead = true; e.deadT = 0; e.state = 'dead';
+
+function killEnemy(e, dir = { x: 0, z: 0 }, type = 'slashA') {
+  e.dead = true; e.deadT = 0; e.state = 'dead'; e.atk = null;
+  setFlash(e.rig, false);
   if (player.attackTarget === e) player.attackTarget = null;
+  const gy = groundY(e.x, e.z);
+  if (e.t.humanoid) {
+    // os ossos se despedaçam e voam na direção do golpe
+    fx.shatter(e.rig.root, new THREE.Vector3(e.x, gy + 0.8, e.z), type === 'heavy' ? 1.5 : 1.1, dir);
+    e.shattered = true;
+    fx.burst(e.x, gy + 1, e.z, { n: 24, color: e.type === 'lord' ? 0x70ff9a : 0xd8d0b8, speed: 4, life: 0.8, grav: 3 });
+    sfx.shatter();
+  } else sfx.yelp();
+  if (e.type === 'lord') {
+    freeze(0.25); addTrauma(0.9); feel.slowmo = 1.2;
+    fx.ring(e.x, gy + 0.1, e.z, { color: 0x70ff9a, size: 9, life: 0.6, ground: true });
+    fx.burst(e.x, gy + 1.5, e.z, { n: 80, color: 0x70ff9a, speed: 7, life: 1.2, grav: 2 });
+  }
   const gold = ri(...e.t.gold);
   player.gold += gold;
   log(`${e.t.name} destruído. +${e.t.xp} XP${gold ? `, +${gold} ouro` : ''}`, 'c-acc');
-  if (gold) floatText(`+${gold} ouro`, e.x, groundY(e.x, e.z) + 2.7, e.z, '#f0b450');
+  if (gold) floatText(`+${gold} ouro`, e.x, gy + 2.7, e.z, 'gold');
   gainXp(e.t.xp);
   if (e.type === 'skeleton' && quest.stage === 1 && ++quest.kills >= 6) { quest.stage = 2; log('Esqueletos suficientes. Volte ao Ancião.', 'c-ok'); }
   if (e.type === 'lord' && quest.stage === 3) { quest.stage = 4; log('O Lorde Esqueleto caiu! Volte ao Ancião.', 'c-ok'); }
@@ -187,27 +258,89 @@ function dropPotion(x, z) {
   g.position.set(x, groundY(x, z) + 0.2, z); scene.add(g);
   pickups.push({ x, z, mesh: g });
 }
-function playerAttack(single) {
-  if (player.atkCd > 0 || player.dead) return;
-  player.atkCd = 0.7; player.swing = 1;
-  // o dano acontece no meio do golpe, quando a espada desce
-  setTimeout(() => {
-    if (player.dead) return;
-    if (single) { if (!single.dead && Math.hypot(single.x - player.x, single.z - player.z) < 2.6 + (single.t.radius || 0)) damageEnemy(single); return; }
-    const fx = Math.sin(player.rot), fz = Math.cos(player.rot);
-    for (const e of enemies) {
-      if (e.dead) continue;
-      const dx = e.x - player.x, dz = e.z - player.z, d = Math.hypot(dx, dz);
-      if (d < 2.3 + (e.t.radius || 0) && (dx * fx + dz * fz) / (d || 1) > 0.35) damageEnemy(e);
+
+const faceDir = dir => { player.rot = Math.atan2(dir.x, dir.z); };
+const facing = () => ({ x: Math.sin(player.rot), z: Math.cos(player.rot) });
+function dirTo(x, z) { const dx = x - player.x, dz = z - player.z, l = Math.hypot(dx, dz) || 1; return { x: dx / l, z: dz / l }; }
+
+function startAttack(type, dir) {
+  if (dir) faceDir(dir);
+  player.act = { kind: 'attack', type, t: 0, dur: ATTACKS[type].dur, hitAt: ATTACKS[type].hit, hitDone: false, swung: false };
+}
+// combo de 3 golpes; cliques durante a parte final do golpe ficam guardados
+function requestAttack(dir) {
+  const p = player;
+  if (p.dead || dialogOpen) return;
+  if (p.act) { if (p.act.kind === 'attack' && p.act.type !== 'heavy' && p.act.t > 0.35) p.queued = dir || true; return; }
+  if (p.comboTimer <= 0) p.combo = 0;
+  startAttack(COMBO[p.combo], dir);
+  p.combo = (p.combo + 1) % COMBO.length;
+}
+function heavyAttack(dir) {
+  const p = player;
+  if (p.dead || dialogOpen || p.heavyCd > 0 || (p.act && p.act.kind === 'dodge')) return;
+  startAttack('heavy', dir); p.heavyCd = HEAVY_CD; p.combo = 0; p.queued = null;
+}
+function dodge(dir) {
+  const p = player;
+  if (p.dead || dialogOpen || p.dodgeCd > 0) return;
+  if (p.act && p.act.kind === 'attack' && p.act.type === 'heavy' && !p.act.hitDone) return;
+  dir = dir || facing(); faceDir(dir);
+  p.act = { kind: 'dodge', t: 0, dur: 0.45, dx: dir.x, dz: dir.z };
+  p.invuln = 0.4; p.dodgeCd = DODGE_CD; p.moveTarget = null; p.attackTarget = null; p.queued = null;
+  sfx.dodge();
+  fx.burst(p.x, groundY(p.x, p.z) + 0.1, p.z, { n: 10, color: 0x6a6a7a, speed: 2, up: 0.5, life: 0.5, grav: 1 });
+}
+function resolvePlayerHit(type) {
+  const A = ATK_PARAMS[type], p = player, f = facing();
+  let hits = 0, crit = false;
+  const cx = type === 'heavy' ? p.x + f.x * 1.4 : p.x, cz = type === 'heavy' ? p.z + f.z * 1.4 : p.z;
+  for (const e of enemies) {
+    if (e.dead) continue;
+    const rad = e.t.radius || 0;
+    if (type === 'heavy') { if (Math.hypot(e.x - cx, e.z - cz) > 2.0 + rad) continue; }
+    else {
+      const ex = e.x - p.x, ez = e.z - p.z, de = Math.hypot(ex, ez);
+      if (de > A.range + rad || (ex * f.x + ez * f.z) / (de || 1) < A.arc) continue;
     }
-  }, 200);
+    crit = damageEnemy(e, type, dirTo(e.x, e.z)) || crit; hits++;
+  }
+  if (type === 'heavy') {
+    const gy = groundY(cx, cz);
+    fx.ring(cx, gy + 0.08, cz, { color: 0xbfd4ff, size: 5, life: 0.4, ground: true });
+    fx.burst(cx, gy + 0.1, cz, { n: 30, color: 0x7a7a88, speed: 5, up: 2.5, life: 0.7, grav: 8 });
+    fx.burst(cx, gy + 0.2, cz, { n: 16, color: 0x9fc0ff, speed: 7, up: 3, life: 0.35, grav: 10 });
+    sfx.heavyImpact(); addTrauma(0.55); freeze(hits ? A.stop : 0.05);
+  } else if (hits) { freeze(A.stop + (crit ? 0.05 : 0)); addTrauma(A.shake + (crit ? 0.15 : 0)); }
+}
+
+// ---------------------------------------------------------- golpes dos inimigos
+function enemyStrike(e) {
+  const t = e.t, dp = Math.hypot(player.x - e.x, player.z - e.z);
+  const inFront = ((player.x - e.x) * Math.sin(e.rot) + (player.z - e.z) * Math.cos(e.rot)) / (dp || 1) > 0.2;
+  if (e.type === 'lord') {
+    const gx = e.x + Math.sin(e.rot) * 1.8, gz = e.z + Math.cos(e.rot) * 1.8;
+    fx.ring(gx, groundY(gx, gz) + 0.08, gz, { color: 0x70ff9a, size: 4, life: 0.4, ground: true });
+    fx.burst(gx, groundY(gx, gz) + 0.1, gz, { n: 20, color: 0x6a6a7a, speed: 4, up: 2, life: 0.6, grav: 8 });
+    sfx.heavyImpact(); if (dp < 8) addTrauma(0.3);
+  }
+  if (player.dead || dp > t.reach + 0.7 || !inFront) return;
+  if (player.invuln > 0) { floatText('esquiva', player.x, groundY(player.x, player.z) + 2.4, player.z, 'info'); return; }
+  hurtPlayer(e);
 }
 function hurtPlayer(e) {
   const d = ri(...e.t.dmg);
   player.hp -= d;
-  floatText('-' + d, player.x, groundY(player.x, player.z) + 2.2, player.z, '#e05a4a', 15);
+  const dx = player.x - e.x, dz = player.z - e.z, l = Math.hypot(dx, dz) || 1, kb = e.type === 'lord' ? 7 : 3.5;
+  player.kvx += dx / l * kb; player.kvz += dz / l * kb;
+  player.react = 1;
+  feel.hurtFlash = 1; addTrauma(e.type === 'lord' ? 0.65 : 0.35); freeze(0.05);
+  const y = groundY(player.x, player.z) + 1.3;
+  fx.burst(player.x, y, player.z, { n: 12, color: 0xffc070, speed: 5, life: 0.3, grav: 6 });
+  sfx.hurt();
+  floatText('-' + d, player.x, y + 0.9, player.z, 'hurt');
   if (player.hp <= 0 && !player.dead) {
-    player.hp = 0; player.dead = true; player.deadT = 0;
+    player.hp = 0; player.dead = true; player.deadT = 0; player.act = null;
     player.moveTarget = player.attackTarget = null;
     const lost = Math.floor(player.gold * 0.1); player.gold -= lost;
     log(`Você foi morto por: ${e.t.name}.${lost ? ` Perdeu ${lost} de ouro.` : ''}`, 'c-hp');
@@ -221,7 +354,8 @@ function drinkPotion() {
   if (player.hp >= player.maxHp) { log('Sua vida já está cheia.', 'c-dim'); return; }
   player.potions--; const heal = Math.round(player.maxHp * 0.5);
   player.hp = Math.min(player.maxHp, player.hp + heal);
-  floatText('+' + heal, player.x, groundY(player.x, player.z) + 2.4, player.z, '#8fd27a', 16);
+  floatText('+' + heal, player.x, groundY(player.x, player.z) + 2.4, player.z, 'heal');
+  sfx.pickup();
   log(`Você bebe uma poção (+${heal} HP).`, 'c-ok'); updateHud();
 }
 
@@ -242,9 +376,11 @@ addEventListener('keydown', e => {
   keys.add(k);
   if (e.repeat) return;
   if (dialogOpen) { if (['f', 'enter', ' '].includes(k)) closeDialog(true); else if (k === 'escape') closeDialog(false); return; }
-  if (k === ' ') playerAttack(null);
+  if (k === ' ') dodge(player.inDir || mouseDir());
+  else if (k === 'r') heavyAttack(mouseDir());
   else if (k === '1') drinkPotion();
   else if (k === 'f') { if (!tryTalk()) log('Não há ninguém por perto.', 'c-dim'); }
+  else if (k === 'm') log(toggleMute() ? 'Som desligado.' : 'Som ligado.', 'c-dim');
   else if (k === 't') ascii.material.uniforms.asciiOn.value = 1 - ascii.material.uniforms.asciiOn.value;
   else if (k === ']') ascii.material.uniforms.cell.value = cellSize = Math.min(20, cellSize + 1);
   else if (k === '[') ascii.material.uniforms.cell.value = cellSize = Math.max(4, cellSize - 1);
@@ -260,7 +396,7 @@ addEventListener('mousemove', e => {
   if (mouse.rdrag) camYaw -= (e.clientX - mouse.lastX) * 0.008;
   mouse.lastX = e.clientX; mouse.x = e.clientX; mouse.y = e.clientY;
 });
-addEventListener('mouseup', e => { if (e.button === 2) mouse.rdrag = false; });
+addEventListener('mouseup', e => { if (e.button === 1) mouse.rdrag = false; });
 addEventListener('contextmenu', e => e.preventDefault());
 addEventListener('wheel', e => { camDist = clamp(camDist + Math.sign(e.deltaY) * 1.5, 7, 40); }, { passive: true });
 
@@ -269,27 +405,41 @@ const clickRing = new THREE.Mesh(new THREE.RingGeometry(0.35, 0.55, 16).rotateX(
 clickRing.visible = false; scene.add(clickRing);
 
 const raycaster = new THREE.Raycaster();
+function groundAtMouse() {
+  raycaster.setFromCamera(new THREE.Vector2(mouse.x / innerWidth * 2 - 1, -mouse.y / innerHeight * 2 + 1), camera);
+  const hit = raycaster.intersectObject(world.terrain)[0];
+  return hit ? hit.point : null;
+}
+function mouseDir() { const p = groundAtMouse(); return p ? dirTo(p.x, p.z) : facing(); }
+
 renderer.domElement.addEventListener('mousedown', e => {
   if (!started) return;
-  if (e.button === 2) { mouse.rdrag = true; mouse.lastX = e.clientX; return; }
-  if (e.button !== 0 || player.dead) return;
+  if (e.button === 1) { e.preventDefault(); mouse.rdrag = true; mouse.lastX = e.clientX; return; }
+  if (player.dead) return;
+  if (e.button === 2) { heavyAttack(hovered && hovered !== elder ? dirTo(hovered.x, hovered.z) : mouseDir()); return; }
+  if (e.button !== 0) return;
   if (dialogOpen) { closeDialog(false); return; }
+  if (e.shiftKey) { player.moveTarget = player.attackTarget = null; requestAttack(mouseDir()); return; }
   if (hovered === elder) {
     if (!tryTalk()) { player.moveTarget = { x: elder.x, z: elder.z + 1.4 }; player.attackTarget = null; player.talkPending = true; }
     return;
   }
-  if (hovered) { player.attackTarget = hovered; player.moveTarget = null; player.talkPending = false; return; }
-  raycaster.setFromCamera(new THREE.Vector2(e.clientX / innerWidth * 2 - 1, -e.clientY / innerHeight * 2 + 1), camera);
-  const hit = raycaster.intersectObject(world.terrain)[0];
+  if (hovered) {
+    player.attackTarget = hovered; player.moveTarget = null; player.talkPending = false;
+    if (Math.hypot(hovered.x - player.x, hovered.z - player.z) < 1.9 + (hovered.t.radius || 0)) requestAttack(dirTo(hovered.x, hovered.z));
+    return;
+  }
+  const hit = groundAtMouse();
   if (hit) {
-    player.moveTarget = { x: hit.point.x, z: hit.point.z }; player.attackTarget = null; player.talkPending = false;
-    clickRing.position.set(hit.point.x, groundY(hit.point.x, hit.point.z) + 0.06, hit.point.z);
+    player.moveTarget = { x: hit.x, z: hit.z }; player.attackTarget = null; player.talkPending = false;
+    clickRing.position.set(hit.x, groundY(hit.x, hit.z) + 0.06, hit.z);
     clickRing.visible = true; clickRing.material.opacity = 1;
   }
 });
 
 $('intro').addEventListener('click', () => {
   $('intro').style.display = 'none'; document.body.classList.remove('intro'); started = true;
+  initAudio();
   log('Bem-vindo ao Reino de Ferro.', 'c-acc');
   log('Fale com o Ancião Aldric (o velho com o "!" amarelo).', 'c-dim');
   updateHud();
@@ -311,6 +461,7 @@ function updatePlayer(dt, time) {
     rig.root.rotation.x = -Math.min(Math.PI / 2, p.deadT * 3);
     if (p.deadT > 3) {
       p.dead = false; p.hp = p.maxHp; p.x = SPAWN.x; p.z = SPAWN.z; rig.root.rotation.x = 0;
+      p.kvx = p.kvz = 0; p.react = 0;
       $('death').style.display = 'none';
       for (const e of enemies) if (!e.dead) e.state = 'return';
       updateHud();
@@ -318,8 +469,14 @@ function updatePlayer(dt, time) {
     rig.root.position.set(p.x, groundY(p.x, p.z), p.z);
     return;
   }
-  p.atkCd = Math.max(0, p.atkCd - dt);
-  p.swing = Math.max(0, p.swing - dt * 1.9);
+  p.heavyCd = Math.max(0, p.heavyCd - dt); p.dodgeCd = Math.max(0, p.dodgeCd - dt);
+  p.invuln = Math.max(0, p.invuln - dt); p.comboTimer = Math.max(0, p.comboTimer - dt);
+  p.react = Math.max(0, p.react - dt * 3.5);
+  if (Math.abs(p.kvx) + Math.abs(p.kvz) > 0.02) {
+    moveEntity(p, p.kvx * dt, p.kvz * dt, 0.35);
+    const k = Math.exp(-9 * dt); p.kvx *= k; p.kvz *= k;
+  }
+
   let moving = false;
   const speed = 5.2;
   let ix = 0, iz = 0;
@@ -329,19 +486,49 @@ function updatePlayer(dt, time) {
     if (keys.has('a') || keys.has('arrowleft')) ix -= 1;
     if (keys.has('d') || keys.has('arrowright')) ix += 1;
   }
+  p.inDir = null;
   if (ix || iz) {
+    const fx_ = -Math.sin(camYaw), fz_ = -Math.cos(camYaw), rx = Math.cos(camYaw), rz = -Math.sin(camYaw);
+    const dx = rx * ix - fx_ * iz, dz = rz * ix - fz_ * iz, l = Math.hypot(dx, dz);
+    p.inDir = { x: dx / l, z: dz / l };
+  }
+
+  const act = p.act;
+  if (act && act.kind === 'dodge') {
+    act.t += dt / act.dur;
+    const sp = 9.5 * (1 - act.t * 0.7);
+    moveEntity(p, act.dx * sp * dt, act.dz * sp * dt, 0.35);
+    if (act.t >= 1) p.act = null;
+  } else if (act && act.kind === 'attack') {
+    act.t += dt / act.dur;
+    // avanço do corpo no golpe, a não ser que já esteja colado no inimigo
+    const lunge = act.type === 'heavy' ? 2.0 : act.type === 'finisher' ? 1.1 : 0.6, f = facing();
+    const blocked = enemies.some(e => !e.dead && Math.hypot(e.x - p.x, e.z - p.z) < 1.3 + (e.t.radius || 0)
+      && ((e.x - p.x) * f.x + (e.z - p.z) * f.z) > 0);
+    if (!blocked && act.t > act.hitAt - 0.22 && act.t < act.hitAt) {
+      const v = lunge / (0.22 * act.dur);
+      moveEntity(p, f.x * v * dt, f.z * v * dt, 0.35);
+    }
+    if (!act.swung && act.t > act.hitAt - 0.15) { act.swung = true; sfx.swing(act.type === 'heavy'); }
+    if (!act.hitDone && act.t >= act.hitAt) { act.hitDone = true; resolvePlayerHit(act.type); }
+    if (act.t > act.hitAt - 0.25 && act.t < act.hitAt + 0.18) {
+      fx.trail(rig.sword.localToWorld(trailA.copy(rig.swordTip)), rig.sword.localToWorld(trailB.copy(rig.swordMid)), act.type === 'heavy' ? 0xd8e4ff : 0x8fb0ff);
+    }
+    if (act.t >= 1) {
+      p.act = null; p.comboTimer = 0.55;
+      if (p.queued) { const q = p.queued; p.queued = null; requestAttack(q === true ? null : q); }
+    }
+  } else if (p.inDir) {
     p.moveTarget = p.attackTarget = null; p.talkPending = false;
-    const fx = -Math.sin(camYaw), fz = -Math.cos(camYaw), rx = Math.cos(camYaw), rz = -Math.sin(camYaw);
-    let dx = rx * ix - fx * iz, dz = rz * ix - fz * iz; const l = Math.hypot(dx, dz); dx /= l; dz /= l;
-    moving = moveEntity(p, dx * speed * dt, dz * speed * dt, 0.35);
-    faceTo(p, p.x + dx, p.z + dz, dt);
+    moving = moveEntity(p, p.inDir.x * speed * dt, p.inDir.z * speed * dt, 0.35);
+    faceTo(p, p.x + p.inDir.x, p.z + p.inDir.z, dt);
   } else if (p.attackTarget) {
     const e = p.attackTarget, d = Math.hypot(e.x - p.x, e.z - p.z);
     if (e.dead) p.attackTarget = null;
-    else if (d > 1.6 + (e.t.radius || 0)) {
+    else if (d > 1.7 + (e.t.radius || 0)) {
       moving = moveEntity(p, (e.x - p.x) / d * speed * dt, (e.z - p.z) / d * speed * dt, 0.35);
       faceTo(p, e.x, e.z, dt);
-    } else { faceTo(p, e.x, e.z, dt, 20); playerAttack(e); }
+    } else requestAttack(dirTo(e.x, e.z));
   } else if (p.moveTarget) {
     const t = p.moveTarget, d = Math.hypot(t.x - p.x, t.z - p.z);
     if (d < 0.25 || (p.talkPending && tryTalk())) { p.moveTarget = null; p.talkPending = false; }
@@ -358,40 +545,57 @@ function updatePlayer(dt, time) {
     const k = pickups[i];
     if (Math.hypot(k.x - p.x, k.z - p.z) < 1.0) {
       scene.remove(k.mesh); pickups.splice(i, 1); p.potions++;
-      log('Você pegou uma poção de cura.', 'c-ok'); updateHud();
+      sfx.pickup(); log('Você pegou uma poção de cura.', 'c-ok'); updateHud();
     }
   }
   rig.root.position.set(p.x, groundY(p.x, p.z), p.z);
   rig.root.rotation.y = p.rot;
-  poseHumanoid(rig, { phase: p.phase, move: p.moveAmt, attack: p.swing > 0 ? 1 - p.swing : -1, time });
-  animateCape(rig, p.moveAmt, time);
+  const a = p.act;
+  poseHumanoid(rig, { phase: p.phase, move: p.moveAmt, time, react: p.react,
+    attack: a && a.kind === 'attack' ? Math.min(1, a.t) : -1, attackType: a ? a.type : undefined,
+    dodge: a && a.kind === 'dodge' ? Math.min(1, a.t) : -1 });
+  animateCape(rig, a && a.kind === 'dodge' ? 1 : p.moveAmt, time);
 }
 
 function updateEnemy(e, dt, time) {
-  const t = e.t, root = e.rig.root;
+  const t = e.t;
   if (e.dead) {
     e.deadT += dt;
-    root.rotation.x = -Math.min(Math.PI / 2, e.deadT * 4);
-    root.position.y = groundY(e.x, e.z) - Math.max(0, e.deadT - 1.5) * 0.6;
-    root.visible = e.deadT < 4;
+    if (!e.shattered) {   // lobo: tomba de lado e afunda
+      const root = e.rig.root;
+      root.rotation.z = Math.min(Math.PI / 2, e.deadT * 5);
+      root.position.y = groundY(e.x, e.z) - Math.max(0, e.deadT - 2) * 0.4;
+      root.visible = e.deadT < 4.5;
+    }
     if (e.deadT > t.respawn) {
-      Object.assign(e, { dead: false, hp: t.hp, x: e.sx, z: e.sz, state: 'idle' });
-      root.rotation.x = 0; root.visible = true;
+      if (e.shattered) { scene.remove(e.rig.root); e.rig = t.make(); scene.add(e.rig.root); e.shattered = false; }
+      Object.assign(e, { dead: false, hp: t.hp, x: e.sx, z: e.sz, state: 'idle', react: 0, kvx: 0, kvz: 0, atk: null });
+      e.rig.root.rotation.set(0, 0, 0); e.rig.root.visible = true;
     }
     return;
   }
-  e.cd = Math.max(0, e.cd - dt); e.swing = Math.max(0, e.swing - dt * 1.6); e.hit = Math.max(0, e.hit - dt);
+  const root = e.rig.root, rad = t.radius || 0.4;
+  e.cd = Math.max(0, e.cd - dt); e.react = Math.max(0, e.react - dt * 3);
+  if (e.flash > 0) { e.flash -= dt; if (e.flash <= 0) setFlash(e.rig, false); }
+  if (Math.abs(e.kvx) + Math.abs(e.kvz) > 0.02) {
+    moveEntity(e, e.kvx * dt, e.kvz * dt, rad);
+    const k = Math.exp(-7 * dt); e.kvx *= k; e.kvz *= k;
+  }
   const dp = Math.hypot(player.x - e.x, player.z - e.z), dh = Math.hypot(e.sx - e.x, e.sz - e.z);
   let moving = false;
-  const sp = t.speed, rad = t.radius || 0.4;
+  const sp = t.speed;
   if (e.state === 'idle' && !player.dead && dp < t.aggro) e.state = 'chase';
   if (e.state === 'chase' && (player.dead || dp > t.aggro * 2.2 || dh > 28)) e.state = 'return';
-  if (e.state === 'chase') {
+  if (e.atk) {
+    e.atk.t += dt / t.atkDur;
+    if (!e.atk.done && e.atk.t >= t.atkHit) { e.atk.done = true; enemyStrike(e); }
+    if (e.atk && e.atk.t < t.atkHit) faceTo(e, player.x, player.z, dt, 4);   // mira devagar durante a preparação
+    if (e.atk && e.atk.t >= 1) e.atk = null;
+  } else if (e.react > 0.35) {
+    // cambaleando: não age
+  } else if (e.state === 'chase') {
     if (dp > t.reach) moving = moveEntity(e, (player.x - e.x) / dp * sp * dt, (player.z - e.z) / dp * sp * dt, rad);
-    else if (e.cd <= 0) {
-      e.cd = t.cd; e.swing = 1;
-      setTimeout(() => { if (!e.dead && !player.dead && Math.hypot(player.x - e.x, player.z - e.z) < t.reach + 0.6) hurtPlayer(e); }, 300);
-    }
+    else if (e.cd <= 0) { e.cd = t.cd; e.atk = { t: 0, done: false }; }
     faceTo(e, player.x, player.z, dt, 8);
   } else if (e.state === 'return') {
     if (dh < 0.6) e.state = 'idle';
@@ -415,13 +619,13 @@ function updateEnemy(e, dt, time) {
   }
   e.moveAmt = blend(e.moveAmt, moving ? 1 : 0, dt);
   if (moving) e.phase += dt * sp * (t.humanoid ? 2.4 : 2.6) * (e.state === 'idle' ? 0.5 : 1);
-  root.position.set(e.x, groundY(e.x, e.z) + (e.hit > 0 ? 0.1 : 0), e.z);
+  root.position.set(e.x, groundY(e.x, e.z), e.z);
   root.rotation.y = e.rot;
-  const attack = e.swing > 0 ? 1 - e.swing : -1;
+  const attack = e.atk ? Math.min(1, e.atk.t) : -1;
   if (t.humanoid) {
-    poseHumanoid(e.rig, { phase: e.phase, move: e.moveAmt, attack, time: time + e.sx, jitter: 0.04 });
+    poseHumanoid(e.rig, { phase: e.phase, move: e.moveAmt, attack, time: time + e.sx, jitter: 0.04, react: e.react, reactSide: e.reactSide });
     animateCape(e.rig, e.moveAmt, time);
-  } else poseWolf(e.rig, { phase: e.phase, move: e.moveAmt, attack, time: time + e.sx });
+  } else poseWolf(e.rig, { phase: e.phase, move: e.moveAmt, attack, time: time + e.sx, react: e.react });
 }
 
 function separate() {
@@ -462,12 +666,18 @@ function updateBars() {
 
 const clock = new THREE.Clock();
 const camTarget = new THREE.Vector3(player.x, 0, player.z);
-let hudTimer = 0, introBlend = 0;
+let hudTimer = 0, introBlend = 0, gameTime = 0;
 const camPos = new THREE.Vector3(), camLook = new THREE.Vector3(), introPos = new THREE.Vector3(), introLook = new THREE.Vector3();
 
 function frame() {
   requestAnimationFrame(frame);
-  const dt = Math.min(clock.getDelta(), 0.05), time = clock.elapsedTime;
+  const realDt = Math.min(clock.getDelta(), 0.05);
+  // hitstop congela o jogo; câmera lenta (morte do chefe) desacelera
+  let dt = realDt;
+  if (feel.hitstop > 0) { feel.hitstop -= realDt; dt = 0; }
+  else if (feel.slowmo > 0) { feel.slowmo -= realDt; dt *= 0.35; }
+  gameTime += dt;
+  const time = gameTime;
 
   if (started) {
     if (keys.has('q')) camYaw += dt * 1.8;
@@ -479,38 +689,49 @@ function frame() {
       updateEnemy(e, dt, time);
     }
     separate();
-    hudTimer += dt; if (hudTimer > 0.25) { hudTimer = 0; updateHud(); }
+    hudTimer += realDt; if (hudTimer > 0.1) { hudTimer = 0; updateHud(); }
     if (!player.dead && player.hp < player.maxHp && !enemies.some(e => e.state === 'chase')) player.hp = Math.min(player.maxHp, player.hp + dt * 1.5);
   } else {
     poseKneel(player.rig, time);
     player.rig.root.position.set(player.x, groundY(player.x, player.z), player.z);
     player.rig.root.rotation.y = player.rot;
   }
-  introBlend = started ? Math.min(1, introBlend + dt / 2.2) : 0;
+  introBlend = started ? Math.min(1, introBlend + realDt / 2.2) : 0;
   poseElder(elder.rig, time);
   elder.rig.marker.visible = [0, 2, 4].includes(quest.stage);
   for (const k of pickups) { k.mesh.rotation.y = time * 2; k.mesh.position.y = groundY(k.x, k.z) + 0.25 + Math.sin(time * 3) * 0.08; }
-  if (clickRing.visible) { clickRing.material.opacity -= dt * 1.5; if (clickRing.material.opacity <= 0) clickRing.visible = false; }
+  if (clickRing.visible) { clickRing.material.opacity -= realDt * 1.5; if (clickRing.material.opacity <= 0) clickRing.visible = false; }
 
   // câmera
-  camTarget.lerp(tmpV.set(player.x, groundY(player.x, player.z), player.z), 1 - Math.exp(-dt * 8));
+  camTarget.lerp(tmpV.set(player.x, groundY(player.x, player.z), player.z), 1 - Math.exp(-realDt * 8));
   const cd = camDist * Math.cos(camPitch);
   camPos.set(camTarget.x + Math.sin(camYaw) * cd, camTarget.y + camDist * Math.sin(camPitch), camTarget.z + Math.cos(camYaw) * cd);
   camLook.set(camTarget.x, camTarget.y + 1, camTarget.z);
   if (introBlend < 1) {
     // plano de cinema: câmera baixa à frente do cavaleiro ajoelhado, céu ao fundo
-    const fx = Math.sin(INTRO_ROT), fz = Math.cos(INTRO_ROT), gy = groundY(SPAWN.x, SPAWN.z);
+    const ox = Math.sin(INTRO_ROT), oz = Math.cos(INTRO_ROT), gy = groundY(SPAWN.x, SPAWN.z);
     const sway = Math.sin(time * 0.15) * 0.25;
-    introPos.set(SPAWN.x + fx * 3.6 + fz * (0.7 + sway), gy + 0.35, SPAWN.z + fz * 3.6 - fx * (0.7 + sway));
-    introLook.set(SPAWN.x - fx * 0.5 - fz * 0.9, gy + 2.1, SPAWN.z - fz * 0.5 + fx * 0.9);
+    introPos.set(SPAWN.x + ox * 3.6 + oz * (0.7 + sway), gy + 0.35, SPAWN.z + oz * 3.6 - ox * (0.7 + sway));
+    introLook.set(SPAWN.x - ox * 0.5 - oz * 0.9, gy + 2.1, SPAWN.z - oz * 0.5 + ox * 0.9);
     const t = introBlend * introBlend * (3 - 2 * introBlend);
     camPos.lerpVectors(introPos, camPos, t);
     camLook.lerpVectors(introLook, camLook, t);
   }
   camera.position.copy(camPos);
   camera.lookAt(camLook);
+  // tremor: deslocamento proporcional ao quadrado do "trauma"
+  if (feel.trauma > 0) {
+    const k = feel.trauma * feel.trauma * 0.32 * camDist / 12, T = performance.now() / 1000 * 32;
+    camera.position.x += (Math.sin(T * 1.3) + Math.sin(T * 2.9)) * 0.5 * k;
+    camera.position.y += (Math.sin(T * 1.7 + 1) + Math.sin(T * 3.3)) * 0.5 * k;
+    camera.position.z += (Math.sin(T * 1.1 + 2) + Math.sin(T * 2.3)) * 0.5 * k;
+    feel.trauma = Math.max(0, feel.trauma - realDt * 1.6);
+  }
+  $('hurt').style.opacity = String(feel.hurtFlash);
+  feel.hurtFlash = Math.max(0, feel.hurtFlash - realDt * 2.5);
 
   world.update(dt, time, camTarget, player);
+  fx.update(dt);
 
   // recorte: posição do herói na tela (origem embaixo à esquerda, como gl_FragCoord)
   tmpV.set(player.x, groundY(player.x, player.z) + 1.0, player.z).project(camera);
@@ -528,7 +749,7 @@ function frame() {
   updateHover();
   updateBars();
   for (let i = floats.length - 1; i >= 0; i--) {
-    const f = floats[i]; f.t += dt; f.pos.y += dt * 1.2;
+    const f = floats[i]; f.t += realDt; f.pos.y += realDt * 1.2;
     const s = toScreen(f.pos.x, f.pos.y, f.pos.z);
     f.el.style.left = s.x + 'px'; f.el.style.top = s.y + 'px'; f.el.style.opacity = String(1 - Math.max(0, f.t - 0.6) / 0.5);
     if (f.t > 1.1) { f.el.remove(); floats.splice(i, 1); }
@@ -544,6 +765,6 @@ addEventListener('resize', () => {
 });
 
 // ganchos para testes automatizados
-window.__game = { player, enemies, quest, world, skipIntro: () => { introBlend = 1; }, setCam: (y, d, p) => { camYaw = y; camDist = d; if (p) camPitch = p; } };
+window.__game = { player, enemies, quest, world, requestAttack, heavyAttack, dodge, dirTo, skipIntro: () => { introBlend = 1; }, setCam: (y, d, p) => { camYaw = y; camDist = d; if (p) camPitch = p; } };
 updateHud();
 frame();

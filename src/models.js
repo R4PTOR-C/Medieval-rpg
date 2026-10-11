@@ -3,7 +3,7 @@
 // e as funções de pose que animam caminhada, respiração e ataques.
 import * as THREE from 'three';
 import { glow, TAG } from './geo.js';
-import { kf } from './util.js';
+import { kf, rand, rr } from './util.js';
 
 const PI = Math.PI;
 
@@ -35,7 +35,7 @@ function mat(color, emissive = 0) {          // material genérico (couro, pano,
 }
 // metais: superfície lisa, reflexo forte e azulado
 const METAL = {
-  steel: () => charMat(0x343b4a, { spec: 0xb8ccff, shine: 80, rim: 0.55, flat: false }),
+  steel: () => charMat(0x464f60, { spec: 0xb8ccff, shine: 80, rim: 0.55, flat: false }),
   steelD: () => charMat(0x1f2430, { spec: 0x8098d8, shine: 50, rim: 0.45, flat: false }),
   gold: () => charMat(0x7a5a22, { spec: 0xffd890, shine: 60, rim: 0.3, flat: false }),
   blade: () => charMat(0x8f9aaa, { spec: 0xffffff, shine: 110, rim: 0.8, flat: false, emissive: 0x141c30 }),
@@ -112,7 +112,7 @@ function makeSword({ blade = null, guard = 0xc9a043, grip = 0x4a2e1a, len = 0.85
 export function makeKnight() {
   const r = makeRig(HUMAN);
   const steel = METAL.steel(), steelD = METAL.steelD(), gold = METAL.gold();
-  const steelDS = charMat(0x343b4a, { spec: 0xb8ccff, shine: 80, rim: 0.55, flat: false, side: THREE.DoubleSide });
+  const steelDS = charMat(0x464f60, { spec: 0xb8ccff, shine: 80, rim: 0.55, flat: false, side: THREE.DoubleSide });
   const mail = charMat(0x2e3138, { spec: 0x666e80, shine: 25, rim: 0.35 });
   const red = mat(0x5a0c12), redD = mat(0x3a070c), leather = mat(0x3a2416), dark = glow(0x020205);
 
@@ -142,7 +142,7 @@ export function makeKnight() {
   let parent = J(r.chest, 0, 0.32, -0.19);
   for (let i = 0; i < 5; i++) {
     const seg = J(parent, 0, i ? -0.2 : 0, 0);
-    P(seg, bx(0.46 + i * 0.05, 0.21, 0.02), i % 2 ? redD : red, 0, -0.1, 0);
+    P(seg, bx(0.46 + i * 0.05, 0.21, 0.02), i < 3 ? red : redD, 0, -0.1, 0);
     r.cape.push(seg); parent = seg;
   }
 
@@ -159,9 +159,9 @@ export function makeKnight() {
   for (const [A, s] of [[r.L, -1], [r.R, 1]]) {
     const pa = J(A.shoulder, s * 0.035, 0.03, 0);
     pa.rotation.z = -s * 0.4;
-    P(pa, band(0.16, 0, PI * 0.42, 20), steel, 0, 0, 0, 0, 0, 0, 1.15, 0.9, 1.25);
-    for (let i = 0; i < 3; i++) P(pa, band(0.165 + i * 0.006, PI * (0.4 + i * 0.07), PI * 0.08, 20), i % 2 ? steelD : steel, 0, -0.02 - i * 0.025, 0, 0, 0, 0, 1.15, 0.9, 1.25);
-    P(pa, new THREE.TorusGeometry(0.165, 0.008, 6, 22), gold, 0, -0.105, 0, PI / 2, 0, 0, 1.18, 1.3, 1);
+    P(pa, band(0.14, 0, PI * 0.38, 20), steel, 0, -0.02, 0, 0, 0, 0, 1.05, 0.62, 1.15);
+    for (let i = 0; i < 3; i++) P(pa, band(0.142 + i * 0.006, PI * (0.36 + i * 0.07), PI * 0.08, 20), i % 2 ? steelD : steel, 0, -0.03 - i * 0.022, 0, 0, 0, 0, 1.05, 0.7, 1.15);
+    P(pa, new THREE.TorusGeometry(0.142, 0.007, 6, 22), gold, 0, -0.085, 0, PI / 2, 0, 0, 1.08, 1.18, 1);
     P(A.shoulder, cyl(0.062, 0.058, 0.27, 12), mail, 0, -0.14, 0);
     P(A.shoulder, cyl(0.07, 0.066, 0.15, 14), steel, 0, -0.2, 0);
     P(A.elbow, sph(0.074, 14, 10), steel);
@@ -185,6 +185,8 @@ export function makeKnight() {
   r.sword = makeSword({ len: 1.2, width: 0.045, gripLen: 0.26, guardW: 0.36, guard: gold, grip: 0x2a1810 });
   r.sword.position.set(0, -0.06, 0);
   r.R.hand.add(r.sword);
+  // pontos da lâmina usados pelo rastro do golpe (z0 = 0.16, comprimento 1.2)
+  r.swordTip = new THREE.Vector3(0, 0, 1.34); r.swordMid = new THREE.Vector3(0, 0, 0.5);
 
   // --- luz pessoal (lanterna) que acompanha o herói
   const light = new THREE.PointLight(0xffc890, 7, 14, 2); light.position.set(0.3, 2.8, 1.4);
@@ -196,71 +198,109 @@ export function makeKnight() {
 
 export function makeSkeleton(lord = false) {
   const r = makeRig({ ...HUMAN, hipH: 0.88, shoulderW: 0.22 });
-  const bone = mat(lord ? 0xcfc6a0 : 0xdcd6c0), boneD = mat(lord ? 0xa89e80 : 0xb4ac94);
-  const eye = glow(lord ? 0xff2a10 : 0xff4a30), rag = mat(0x3a3428);
+  const bone = mat(lord ? 0xc9c0a0 : 0xd9d2bc), boneD = mat(lord ? 0x9a9078 : 0xa89f88);
+  const eye = glow(lord ? 0x7dff9a : 0xff3a20), socket = glow(0x050403);
+  const rust = charMat(0x5a3a26, { spec: 0x6a5040, shine: 20, rim: 0.3 }), rustD = mat(0x3a2618);
+  const rag = mat(lord ? 0x2a1238 : [0x3a3428, 0x2c2a30, 0x3a2420][Math.floor(rand() * 3)]);
 
-  // bacia, vértebras, costelas, esterno, clavículas
-  P(r.hips, bx(0.28, 0.08, 0.12), bone);
-  for (const s of [-1, 1]) P(r.hips, sph(0.08, 6, 4), boneD, s * 0.1, 0.03, 0, 0, 0, 0, 1, 0.7, 0.5);
-  for (let i = 0; i < 4; i++) P(r.spine, bx(0.05, 0.035, 0.05), bone, 0, 0.02 + i * 0.05, -0.03);
+  // bacia e sacro
+  P(r.hips, lathe([[0.05, -0.06], [0.13, -0.02], [0.15, 0.04], [0.1, 0.08]], 12), bone, 0, 0, 0, 0, 0, 0, 1.1, 1, 0.7);
+  P(r.hips, bx(0.05, 0.12, 0.05), boneD, 0, 0.06, -0.06);
+  // coluna com processos espinhosos
   for (let i = 0; i < 5; i++) {
-    P(r.chest, new THREE.TorusGeometry(0.15 - i * 0.012, 0.014, 4, 10, PI * 1.6), bone,
-      0, 0.05 + i * 0.058, -0.01, PI / 2, 0, 0.7 * PI, 1, 0.8, 1);
+    P(r.spine, cyl(0.028, 0.028, 0.032, 8), bone, 0, 0.02 + i * 0.045, -0.04);
+    P(r.spine, bx(0.012, 0.02, 0.05), boneD, 0, 0.02 + i * 0.045, -0.075);
   }
-  P(r.chest, bx(0.04, 0.22, 0.03), bone, 0, 0.15, 0.13);
-  P(r.chest, bx(0.05, 0.3, 0.05), boneD, 0, 0.14, -0.13);
-  for (const s of [-1, 1]) P(r.chest, bx(0.2, 0.025, 0.025), bone, s * 0.1, 0.29, 0.04, 0, s * 0.3, 0);
-
-  // crânio: caixa, mandíbula, órbitas com brilho
-  P(r.neck, cyl(0.025, 0.025, 0.1, 6), bone, 0, 0.04, 0);
-  P(r.head, sph(0.13, 10, 8), bone, 0, 0.13, 0, 0, 0, 0, 0.95, 1, 1.08);
-  P(r.head, bx(0.15, 0.06, 0.13), boneD, 0, 0.02, 0.05);
-  for (const s of [-1, 1]) P(r.head, sph(0.032, 6, 4), eye, s * 0.047, 0.14, 0.11);
-  P(r.head, bx(0.03, 0.04, 0.02), glow(0x100808), 0, 0.08, 0.135);
-  for (let i = 0; i < 5; i++) P(r.head, bx(0.016, 0.03, 0.01), bone, -0.04 + i * 0.02, 0.05, 0.123);
-
+  // caixa torácica: costelas em arco, esterno, clavículas, escápulas
+  for (let i = 0; i < 6; i++) {
+    const rad = 0.15 - Math.abs(i - 2.5) * 0.012;
+    P(r.chest, new THREE.TorusGeometry(rad, 0.013, 5, 14, PI * 1.55), bone, 0, 0.03 + i * 0.05, -0.01, PI / 2 + 0.12, 0, 0.725 * PI, 1, 0.8, 1);
+  }
+  P(r.chest, bx(0.035, 0.22, 0.025), bone, 0, 0.15, 0.122, -0.12, 0, 0);
+  for (let i = 0; i < 6; i++) P(r.chest, cyl(0.026, 0.026, 0.03, 8), bone, 0, 0.02 + i * 0.05, -0.12);
+  for (const s of [-1, 1]) {
+    P(r.chest, cyl(0.013, 0.013, 0.2, 6), bone, s * 0.1, 0.3, 0.05, 0, s * 0.3, PI / 2);
+    P(r.chest, bx(0.1, 0.13, 0.015), boneD, s * 0.1, 0.22, -0.14, 0, 0, s * 0.2);
+  }
+  // pescoço e crânio: calota, face, órbitas com brasa, dentes e mandíbula articulada
+  for (let i = 0; i < 3; i++) P(r.neck, cyl(0.022, 0.022, 0.025, 8), bone, 0, i * 0.035, -0.01);
+  const skull = J(r.head, 0, 0.02, 0);
+  P(skull, lathe([[0, 0], [0.09, 0.02], [0.125, 0.08], [0.13, 0.15], [0.115, 0.21], [0.075, 0.25], [0, 0.265]], 16), bone, 0, 0, 0, 0, 0, 0, 0.95, 1, 1.12);
+  P(skull, bx(0.17, 0.11, 0.07), bone, 0, 0.075, 0.095);
+  for (const s of [-1, 1]) {
+    P(skull, bx(0.045, 0.03, 0.09), boneD, s * 0.085, 0.085, 0.08);
+    P(skull, sph(0.036, 8, 6), socket, s * 0.045, 0.125, 0.118, 0, 0, 0, 1, 0.9, 0.55);
+    P(skull, sph(0.015, 6, 4), eye, s * 0.045, 0.125, 0.135);
+  }
+  P(skull, cone(0.02, 0.045, 3), socket, 0, 0.085, 0.132, PI, 0, 0);
+  for (let i = 0; i < 6; i++) P(skull, bx(0.013, 0.022, 0.012), bone, -0.04 + i * 0.016, 0.03, 0.127);
+  const jaw = J(skull, 0, 0.04, 0.02);
+  P(jaw, bx(0.15, 0.035, 0.1), boneD, 0, -0.025, 0.04);
+  for (let i = 0; i < 6; i++) P(jaw, bx(0.012, 0.018, 0.012), bone, -0.04 + i * 0.016, -0.004, 0.088);
+  r.jaw = jaw;
+  // membros: ossos longos com articulações, rádio e ulna, dedos
   for (const [A, s] of [[r.L, -1], [r.R, 1]]) {
-    P(A.shoulder, sph(0.035, 6, 4), boneD);
-    P(A.shoulder, cyl(0.022, 0.018, 0.27, 6), bone, 0, -0.14, 0);
-    P(A.elbow, sph(0.03, 6, 4), boneD);
-    for (const o of [-1, 1]) P(A.elbow, cyl(0.012, 0.012, 0.25, 5), bone, o * 0.014, -0.13, 0);
-    P(A.hand, bx(0.06, 0.08, 0.03), boneD, 0, -0.04, 0);
-    P(A.thigh, sph(0.04, 6, 4), boneD);
-    P(A.thigh, cyl(0.026, 0.02, 0.42, 6), bone, 0, -0.21, 0);
-    P(A.knee, sph(0.036, 6, 4), boneD);
-    for (const o of [-1, 1]) P(A.knee, cyl(0.014, 0.012, 0.4, 5), bone, o * 0.016, -0.2, 0);
-    P(A.foot, bx(0.07, 0.03, 0.16), boneD, 0, 0, 0.04);
+    P(A.shoulder, sph(0.036, 8, 6), boneD);
+    P(A.shoulder, cyl(0.02, 0.017, 0.25, 6), bone, 0, -0.14, 0);
+    P(A.elbow, sph(0.03, 8, 6), boneD);
+    P(A.elbow, cyl(0.011, 0.011, 0.25, 5), bone, 0.012, -0.13, 0, 0, 0, 0.04);
+    P(A.elbow, cyl(0.011, 0.011, 0.25, 5), bone, -0.012, -0.13, 0, 0, 0, -0.04);
+    P(A.hand, bx(0.05, 0.04, 0.025), boneD, 0, -0.02, 0);
+    for (let i = 0; i < 4; i++) P(A.hand, cyl(0.006, 0.005, 0.07, 4), bone, -0.018 + i * 0.012, -0.07, 0.005);
+    P(A.thigh, sph(0.04, 8, 6), boneD);
+    P(A.thigh, cyl(0.024, 0.019, 0.42, 6), bone, 0, -0.21, 0);
+    P(A.knee, sph(0.034, 8, 6), boneD, 0, 0, 0.02);
+    P(A.knee, cyl(0.016, 0.013, 0.4, 5), bone, 0.01, -0.2, 0);
+    P(A.knee, cyl(0.009, 0.008, 0.38, 5), bone, s * -0.025, -0.2, -0.01);
+    P(A.foot, bx(0.06, 0.03, 0.08), boneD, 0, 0, 0.0);
+    for (let i = 0; i < 4; i++) P(A.foot, cyl(0.007, 0.006, 0.09, 4), bone, -0.022 + i * 0.015, -0.005, 0.08, PI / 2, 0, 0);
   }
-  // trapos
-  P(r.hips, bx(0.22, 0.24, 0.02), rag, 0, -0.12, 0.08, 0.1, 0, 0);
-  P(r.hips, bx(0.2, 0.2, 0.02), rag, 0, -0.1, -0.08, -0.1, 0, 0);
+  // trapos rasgados em tiras
+  for (const zs of [1, -1]) for (let i = 0; i < 4; i++) {
+    P(r.hips, bx(0.055, rr(0.16, 0.32), 0.012), rag, -0.08 + i * 0.055, -0.13, zs * 0.085, zs * 0.08, 0, rr(-0.12, 0.12));
+  }
 
   if (lord) {
     for (let i = 0; i < 7; i++) {
       const a = i / 7 * PI * 2;
-      P(r.head, bx(0.035, 0.1, 0.035), glow(0xffd040), Math.cos(a) * 0.12, 0.27, Math.sin(a) * 0.12);
+      P(skull, cone(0.025, 0.12, 4), mat(0xc9a043, 0x6a4a10), Math.cos(a) * 0.12, 0.29, Math.sin(a) * 0.12 * 1.1);
     }
-    P(r.head, cyl(0.13, 0.13, 0.04, 10), mat(0xc9a043), 0, 0.23, 0);
+    P(skull, cyl(0.13, 0.13, 0.04, 14), METAL.gold(), 0, 0.23, 0, 0, 0, 0, 1, 1, 1.1);
     r.cape = [];
     let parent = J(r.chest, 0, 0.3, -0.14);
-    for (let i = 0; i < 4; i++) {
-      const seg = J(parent, 0, i ? -0.21 : 0, 0);
-      P(seg, bx(0.42 + i * 0.06, 0.22, 0.025), mat(i % 2 ? 0x2e1640 : 0x40205a), 0, -0.105, 0);
+    for (let i = 0; i < 5; i++) {
+      const seg = J(parent, 0, i ? -0.2 : 0, 0);
+      P(seg, bx(0.44 + i * 0.06, 0.21, 0.02), mat(i % 2 ? 0x22102e : 0x34184a), 0, -0.1, 0);
       r.cape.push(seg); parent = seg;
     }
-    for (const s of [-1, 1]) P(r.L.shoulder.parent, dome(0.12), mat(0x3a3a44), s * 0.24, 0.27, 0, 0, 0, -s * 0.4);
-    const gs = makeSword({ blade: 0x9aa0b8, guard: 0x3a3a44, len: 1.15, width: 0.05 });
-    gs.position.set(0, -0.06, 0); r.R.hand.add(gs);
+    for (const s of [-1, 1]) {
+      const pa = J(r.chest, s * 0.24, 0.27, 0); pa.rotation.z = -s * 0.45;
+      P(pa, band(0.13, 0, PI * 0.42, 16), METAL.steelD(), 0, 0, 0, 0, 0, 0, 1.15, 0.9, 1.2);
+      for (let i = 0; i < 3; i++) P(pa, cone(0.02, 0.09, 4), METAL.steelD(), (i - 1) * 0.06, 0.1, 0, 0, 0, 0);
+    }
+    const ghost = new THREE.PointLight(0x60ff90, 3, 5, 2); ghost.position.set(0, 0.15, 0.2); skull.add(ghost);
+    r.sword = makeSword({ blade: 0x8a90a8, guard: 0x3a3a44, len: 1.15, width: 0.05, gripLen: 0.24, guardW: 0.34 });
+    r.sword.position.set(0, -0.06, 0); r.R.hand.add(r.sword);
     r.root.scale.setScalar(1.6);
   } else {
-    const sw = makeSword({ blade: 0x8a6a4a, guard: 0x5a4a3a, grip: 0x3a2a1a, len: 0.7 });
-    sw.position.set(0, -0.06, 0); r.R.hand.add(sw);
-    const buckler = new THREE.Group();
-    P(buckler, cyl(0.19, 0.19, 0.04, 10), mat(0x4a3a2a));
-    P(buckler, cyl(0.2, 0.2, 0.02, 10), mat(0x5a4a3a), 0, 0.02, 0);
-    P(buckler, sph(0.05, 6, 4), mat(0x6a6050), 0, 0.03, 0);
-    buckler.position.set(-0.07, -0.14, 0); buckler.rotation.set(0, 0, PI / 2 - 0.3, 'ZYX');
-    r.L.elbow.add(buckler);
+    if (rand() < 0.55) {   // elmo enferrujado com protetor nasal
+      P(skull, lathe([[0.138, 0.12], [0.142, 0.17], [0.132, 0.23], [0.1, 0.27], [0.05, 0.29], [0, 0.296]], 14), rust, 0, 0, 0, 0, 0, 0, 1, 1, 1.12);
+      P(skull, bx(0.025, 0.11, 0.02), rustD, 0, 0.15, 0.158);
+    }
+    if (rand() < 0.5) {    // ombreira solitária
+      const sp = J(r.R.shoulder, 0.03, 0.02, 0); sp.rotation.z = -0.4;
+      P(sp, band(0.11, 0, PI * 0.42, 12), rust, 0, 0, 0, 0, 0, 0, 1.1, 0.9, 1.2);
+    }
+    r.sword = makeSword({ blade: 0x7a5a40, guard: 0x4a3a2a, grip: 0x3a2a1a, len: 0.7 });
+    r.sword.position.set(0, -0.06, 0); r.R.hand.add(r.sword);
+    if (rand() < 0.6) {
+      const buckler = new THREE.Group();
+      P(buckler, cyl(0.19, 0.19, 0.035, 14), mat(0x4a3826));
+      P(buckler, new THREE.TorusGeometry(0.19, 0.015, 5, 16), rust, 0, 0, 0, PI / 2, 0, 0);
+      P(buckler, sph(0.05, 8, 6), rust, 0, 0.025, 0, 0, 0, 0, 1, 0.6, 1);
+      buckler.position.set(-0.07, -0.14, 0); buckler.rotation.set(0, 0, PI / 2 - 0.3, 'ZYX');
+      r.L.elbow.add(buckler);
+    }
   }
   return r;
 }
@@ -269,39 +309,43 @@ export function makeSkeleton(lord = false) {
 
 export function makeWolf() {
   const root = new THREE.Group();
-  const fur = mat(0x6b6a70), furD = mat(0x45444a), furL = mat(0x8e8c94), nose = glow(0x0a0a0a), eye = glow(0xffd040);
+  const fur = mat(0x5e5d66), furD = mat(0x37363e), furL = mat(0x8e8c96), nose = glow(0x050505), eye = glow(0xffcc30), fang = mat(0xe8e0c8);
   const body = J(root, 0, 0.62, 0);
-  P(body, sph(0.24, 8, 6), fur, 0, 0.02, 0.22, 0, 0, 0, 0.95, 1, 1.25);
-  P(body, sph(0.2, 8, 6), furD, 0, 0.01, -0.16, 0, 0, 0, 0.9, 0.9, 1.4);
-  for (let i = 0; i < 6; i++) P(body, cone(0.05, 0.15, 4), furD, 0, 0.2 - i * 0.008, 0.38 - i * 0.13, -0.9, 0, 0);
-  for (const s of [-1, 1]) for (let i = 0; i < 3; i++) P(body, cone(0.04, 0.12, 4), furL, s * 0.2, -0.1, 0.3 - i * 0.12, PI, 0, s * 0.3);
-
+  P(body, sph(0.25, 10, 8), fur, 0, 0.03, 0.2, 0, 0, 0, 0.95, 1.05, 1.3);
+  P(body, sph(0.21, 10, 8), furD, 0, 0.02, -0.18, 0, 0, 0, 0.9, 0.92, 1.35);
+  for (let i = 0; i < 8; i++) P(body, cone(0.06, 0.2, 4), furD, 0, 0.22 - i * 0.008, 0.45 - i * 0.11, -1.0, 0, 0);
+  for (const s of [-1, 1]) for (let i = 0; i < 5; i++) P(body, cone(0.045, 0.16, 4), i % 2 ? furL : fur, s * 0.2, -0.12, 0.38 - i * 0.12, PI, 0, s * 0.35);
   const neck = J(body, 0, 0.1, 0.45);
-  P(neck, sph(0.16, 8, 6), fur, 0, 0.04, 0.04, 0, 0, 0, 1.05, 1, 1.3);
-  for (let i = 0; i < 5; i++) { const a = -0.8 + i * 0.4; P(neck, cone(0.05, 0.16, 4), furL, Math.sin(a) * 0.15, -0.05, 0.08 + Math.cos(a) * 0.04, PI * 0.8, 0, a); }
-  const head = J(neck, 0, 0.13, 0.17);
-  P(head, bx(0.22, 0.18, 0.22), fur, 0, 0, 0.02);
-  P(head, bx(0.13, 0.1, 0.2), furL, 0, -0.04, 0.19);
-  P(head, bx(0.05, 0.04, 0.04), nose, 0, -0.01, 0.3);
-  const jaw = J(head, 0, -0.08, 0.1);
-  P(jaw, bx(0.1, 0.04, 0.17), furD, 0, -0.01, 0.07);
+  P(neck, sph(0.17, 10, 8), fur, 0, 0.03, 0.05, 0, 0, 0, 1.05, 1, 1.3);
+  for (let i = 0; i < 9; i++) { const a = -1 + i * 0.25; P(neck, cone(0.05, 0.2, 4), furL, Math.sin(a) * 0.16, -0.06, 0.08 + Math.cos(a) * 0.05, PI * 0.8, 0, a); }
+  const head = J(neck, 0, 0.14, 0.18);
+  P(head, sph(0.13, 10, 8), fur, 0, 0, 0, 0, 0, 0, 1, 0.85, 1.1);
+  P(head, cyl(0.05, 0.075, 0.2, 8), furL, 0, -0.04, 0.17, PI / 2, 0, 0);
+  P(head, sph(0.03, 6, 4), nose, 0, -0.025, 0.28);
+  P(head, bx(0.16, 0.025, 0.04), furD, 0, 0.06, 0.09);
+  const jaw = J(head, 0, -0.07, 0.07);
+  P(jaw, cyl(0.035, 0.05, 0.18, 6), furD, 0, -0.01, 0.09, PI / 2, 0, 0);
   for (const s of [-1, 1]) {
-    P(head, cone(0.05, 0.14, 4), furD, s * 0.08, 0.14, -0.02, 0, 0, -s * 0.2);
-    P(head, bx(0.045, 0.03, 0.02), eye, s * 0.065, 0.03, 0.13);
+    P(jaw, cone(0.01, 0.04, 4), fang, s * 0.025, 0.02, 0.15);
+    P(head, cone(0.012, 0.05, 4), fang, s * 0.032, -0.09, 0.23, PI, 0, 0);
+    P(head, cone(0.05, 0.16, 4), furD, s * 0.075, 0.12, -0.02, 0, 0, -s * 0.25);
+    P(head, sph(0.02, 6, 4), eye, s * 0.058, 0.03, 0.11);
   }
-  const legs = [[-0.13, 0.32], [0.13, 0.32], [-0.13, -0.34], [0.13, -0.34]].map(([x, z], i) => {
-    const hip = J(body, x, -0.06, z);
-    P(hip, cyl(0.055, 0.04, 0.3, 6), i < 2 ? fur : furD, 0, -0.15, 0);
+  const legs = [[-0.13, 0.32, true], [0.13, 0.32, true], [-0.13, -0.34, false], [0.13, -0.34, false]].map(([x, z, front]) => {
+    const hip = J(body, x, -0.05, z);
+    if (!front) P(hip, sph(0.09, 8, 6), fur, 0, -0.06, 0, 0, 0, 0, 0.8, 1.3, 1);
+    P(hip, cyl(0.06, 0.045, 0.3, 7), front ? fur : furD, 0, -0.15, 0);
     const low = J(hip, 0, -0.3, 0);
-    P(low, cyl(0.035, 0.03, 0.24, 6), furD, 0, -0.12, 0);
-    P(low, bx(0.07, 0.04, 0.1), furD, 0, -0.25, 0.02);
+    P(low, cyl(0.035, 0.03, 0.25, 6), furD, 0, -0.12, 0);
+    P(low, bx(0.075, 0.04, 0.11), furD, 0, -0.25, 0.02);
+    for (let i = 0; i < 3; i++) P(low, sph(0.02, 5, 4), furD, -0.025 + i * 0.025, -0.26, 0.075);
     return { hip, low };
   });
   const tail = [];
   let parent = J(body, 0, 0.12, -0.42);
-  for (let i = 0; i < 3; i++) {
-    const seg = J(parent, 0, 0, i ? -0.15 : 0);
-    P(seg, cyl(0.05 - i * 0.008, 0.06 - i * 0.012, 0.17, 6), i === 2 ? furL : fur, 0, 0, -0.08, PI / 2, 0, 0);
+  for (let i = 0; i < 4; i++) {
+    const seg = J(parent, 0, 0, i ? -0.13 : 0);
+    P(seg, cyl(0.05 + (i === 1 ? 0.02 : 0) - i * 0.008, 0.055 - i * 0.008, 0.15, 7), i === 3 ? furL : fur, 0, 0, -0.07, PI / 2, 0, 0);
     tail.push(seg); parent = seg;
   }
   return { root, body, neck, head, jaw, legs, tail };
@@ -344,8 +388,42 @@ export function makeElder() {
 
 // ---------------------------------------------------------------- poses
 
-// st: { phase, move (0..1), attack (-1 ou 0..1), time, shield, jitter }
-export function poseHumanoid(r, { phase = 0, move = 0, attack = -1, time = 0, shield = false, jitter = 0 }) {
+// Golpes: quadros-chave por canal. Canais ausentes usam a pose base.
+// chY = giro do peito, spX = curva da coluna, rsx/rsz/rex = ombro e cotovelo
+// direitos, lsx/lsz/lex = esquerdos (golpes com as duas mãos), sw = ângulo da
+// espada na mão, drop = agachar.
+export const ATTACKS = {
+  overhead: { dur: 0.6, hit: 0.48, frames: [
+    { t: 0.3, rsx: -2.7, rex: -1.1, chY: 0.45, spX: -0.08 },
+    { t: 0.55, rsx: -0.45, rex: -0.05, chY: -0.5, spX: 0.22 }] },
+  slashA: { dur: 0.42, hit: 0.42, frames: [
+    { t: 0.28, chY: 0.85, spX: -0.05, rsx: -1.2, rsz: 0.9, rex: -0.9, sw: 1.2 },
+    { t: 0.5, chY: -0.85, spX: 0.15, rsx: -1.45, rsz: -0.1, rex: -0.15, sw: 1.5 },
+    { t: 0.75, chY: -0.6, rsx: -1.2, rsz: 0, rex: -0.3, sw: 1.2 }] },
+  slashB: { dur: 0.42, hit: 0.42, frames: [
+    { t: 0.28, chY: -0.8, rsx: -1.3, rsz: -0.5, rex: -1.2, sw: 1.3 },
+    { t: 0.5, chY: 0.8, spX: 0.1, rsx: -1.45, rsz: 0.85, rex: -0.2, sw: 1.5 },
+    { t: 0.75, chY: 0.5, rsx: -1.1, rsz: 0.6, rex: -0.35, sw: 1.2 }] },
+  finisher: { dur: 0.6, hit: 0.5, frames: [
+    { t: 0.35, chY: 0.25, spX: -0.22, rsx: -2.9, rsz: 0.1, rex: -0.6, sw: 1.4, lsx: -2.6, lsz: 0.5, lex: -0.8 },
+    { t: 0.55, spX: 0.35, rsx: -0.9, rex: -0.1, sw: 1.55, lsx: -0.95, lsz: 0.55, lex: -0.4, drop: 0.12 },
+    { t: 0.75, spX: 0.3, rsx: -0.8, rex: -0.15, sw: 1.5, lsx: -0.9, lsz: 0.5, lex: -0.4, drop: 0.1 }] },
+  heavy: { dur: 0.95, hit: 0.6, frames: [
+    { t: 0.45, chY: 0.5, spX: -0.3, rsx: -3.1, rsz: 0.1, rex: -0.5, sw: 1.6, lsx: -2.9, lsz: 0.55, lex: -0.6, drop: -0.05 },
+    { t: 0.6, spX: 0.5, rsx: -0.7, rex: -0.1, sw: 1.6, lsx: -0.75, lsz: 0.5, lex: -0.3, drop: 0.24 },
+    { t: 0.82, spX: 0.45, rsx: -0.7, rex: -0.1, sw: 1.6, lsx: -0.75, lsz: 0.5, lex: -0.3, drop: 0.2 }] },
+};
+function channel(t, frames, ch, base) {
+  const keys = [[0, base]];
+  for (const f of frames) keys.push([f.t, f[ch] ?? base]);
+  keys.push([1, base]);
+  return kf(t, keys);
+}
+
+// st: { phase, move (0..1), attack (-1 ou 0..1), attackType, time, jitter,
+//       react (0..1, reação a golpe), reactSide (-1/1), dodge (-1 ou 0..1) }
+export function poseHumanoid(r, { phase = 0, move = 0, attack = -1, attackType = 'overhead', time = 0, jitter = 0,
+  react = 0, reactSide = 1, dodge = -1 }) {
   const s = Math.sin(phase), c = Math.cos(phase), m = move;
   const br = Math.sin(time * 2.2) * 0.02;
   const j = k => jitter ? Math.sin(time * 13 + k * 7.1) * jitter : 0;
@@ -355,33 +433,54 @@ export function poseHumanoid(r, { phase = 0, move = 0, attack = -1, time = 0, sh
   r.spine.rotation.set(0.05 * m + br * 0.5, -s * 0.08 * m, 0);
   r.chest.rotation.set(br + j(1), -s * 0.1 * m, 0);
   r.head.rotation.set(j(2), s * 0.05 * m + j(3), 0);
-
   for (const [A, sg] of [[r.L, 1], [r.R, -1]]) {
     const ss = s * sg, cc = c * sg;
     A.thigh.rotation.set(-ss * 0.55 * m, 0, 0);
     A.knee.rotation.set(0.08 + m * Math.max(0, cc) * 0.95, 0, 0);
     A.foot.rotation.set(-(A.thigh.rotation.x + A.knee.rotation.x) * 0.6, 0, 0);
   }
-  if (shield) {
-    r.L.shoulder.rotation.set(-0.35 + s * 0.08 * m, 0, -0.18);
-    r.L.elbow.rotation.set(-1.2, 0, 0);
-  } else {
-    r.L.shoulder.rotation.set(s * 0.45 * m + j(4), 0, -0.12);
-    r.L.elbow.rotation.set(-0.25 - Math.max(0, -s) * 0.3 * m, 0, 0);
-  }
-  if (r.sword) r.sword.rotation.x = 0;
-  let sx = -s * 0.4 * m - 0.12, ex = -0.4, chY = 0, spX = 0;
+
+  // pose base dos braços
+  const base = { chY: 0, spX: 0, rsx: -s * 0.4 * m - 0.12, rsz: 0.14, rex: -0.4, sw: 0,
+    lsx: s * 0.45 * m + j(4), lsz: -0.12, lex: -0.25 - Math.max(0, -s) * 0.3 * m, drop: 0 };
+  const v = { ...base };
   if (attack >= 0) {
-    sx = kf(attack, [[0, sx], [0.3, -2.7], [0.55, -0.45], [1, sx]]);
-    ex = kf(attack, [[0, ex], [0.3, -1.1], [0.55, -0.05], [1, ex]]);
-    chY = kf(attack, [[0, 0], [0.3, 0.45], [0.55, -0.5], [1, 0]]);
-    spX = kf(attack, [[0, 0], [0.3, -0.08], [0.55, 0.22], [1, 0]]);
+    const frames = (ATTACKS[attackType] || ATTACKS.overhead).frames;
+    for (const ch in base) v[ch] = channel(attack, frames, ch, base[ch]);
   }
-  r.R.shoulder.rotation.set(sx + j(5), 0, 0.14);
-  r.R.elbow.rotation.set(ex, 0, 0);
-  r.chest.rotation.y += chY;
-  r.spine.rotation.x += spX;
-  if (r.tabard) { r.tabard[0].rotation.x = -Math.abs(s) * 0.25 * m; r.tabard[1].rotation.x = Math.abs(s) * 0.2 * m; }
+  r.R.shoulder.rotation.set(v.rsx + j(5), 0, v.rsz);
+  r.R.elbow.rotation.set(v.rex, 0, 0);
+  r.L.shoulder.rotation.set(v.lsx, 0, v.lsz);
+  r.L.elbow.rotation.set(v.lex, 0, 0);
+  if (r.sword) r.sword.rotation.set(v.sw, 0, 0);
+  r.chest.rotation.y += v.chY;
+  r.spine.rotation.x += v.spX;
+  r.hips.position.y -= v.drop;
+  if (v.drop > 0) for (const A of [r.L, r.R]) { A.thigh.rotation.x -= v.drop * 2.2; A.knee.rotation.x += v.drop * 4; }
+  if (r.jaw) r.jaw.rotation.x = attack >= 0 ? Math.sin(attack * PI) * 0.5 : 0.05 + Math.abs(Math.sin(time * 9)) * 0.08 * m;
+
+  // reação ao golpe: tronco e cabeça jogados para trás, braços abrem
+  if (react > 0) {
+    const k = Math.sin(react * PI * 0.5);
+    r.spine.rotation.x -= 0.4 * k;
+    r.chest.rotation.y += 0.35 * k * reactSide;
+    r.head.rotation.x -= 0.5 * k;
+    r.R.shoulder.rotation.z += 0.5 * k; r.L.shoulder.rotation.z -= 0.5 * k;
+    r.hips.position.y -= 0.05 * k;
+    if (r.jaw) r.jaw.rotation.x = 0.6 * k;
+  }
+
+  // esquiva: cambalhota para a frente em volta do quadril
+  if (dodge >= 0) {
+    const k = Math.sin(dodge * PI);
+    r.hips.position.y = r.p.hipH - 0.45 * k;
+    r.hips.rotation.x = Math.PI * 2 * (dodge * dodge * (3 - 2 * dodge));
+    r.spine.rotation.x = 0.9 * k; r.head.rotation.x = 0.6 * k;
+    for (const A of [r.L, r.R]) { A.thigh.rotation.x = -1.4 * k; A.knee.rotation.x = 1.9 * k; }
+    r.R.shoulder.rotation.set(-0.9 * k, 0, 0.2); r.L.shoulder.rotation.set(-0.9 * k, 0, -0.2);
+    r.R.elbow.rotation.x = -1.2 * k; r.L.elbow.rotation.x = -1.2 * k;
+  }
+  if (r.tabard) { r.tabard[0].rotation.x = -Math.abs(s) * 0.25 * m - v.drop * 2; r.tabard[1].rotation.x = Math.abs(s) * 0.2 * m; }
 }
 
 export function animateCape(r, move, time) {
@@ -392,21 +491,22 @@ export function animateCape(r, move, time) {
   });
 }
 
-export function poseWolf(w, { phase = 0, move = 0, attack = -1, time = 0 }) {
+export function poseWolf(w, { phase = 0, move = 0, attack = -1, time = 0, react = 0 }) {
   const m = move;
   w.body.position.y = 0.62 + Math.sin(phase * 2) * 0.03 * m + Math.sin(time * 2.5) * 0.008;
   w.body.rotation.x = attack >= 0 ? kf(attack, [[0, 0], [0.35, 0.25], [0.6, -0.25], [1, 0]]) : Math.sin(phase * 2) * 0.04 * m;
+  w.body.rotation.z = react > 0 ? Math.sin(react * 18) * 0.25 * react : 0;
   w.legs.forEach((L, i) => {
     const off = [0, PI, PI, 0][i], front = i < 2;
     L.hip.rotation.x = Math.sin(phase + off) * 0.6 * m;
     L.low.rotation.x = (front ? 1 : -0.7) * Math.max(0, Math.cos(phase + off)) * 0.8 * m;
   });
-  w.neck.rotation.x = attack >= 0 ? kf(attack, [[0, 0], [0.35, -0.25], [0.6, 0.35], [1, 0]]) : 0.1 * m + Math.sin(time * 0.7) * 0.05;
+  w.neck.rotation.x = (attack >= 0 ? kf(attack, [[0, 0], [0.35, -0.25], [0.6, 0.35], [1, 0]]) : 0.1 * m + Math.sin(time * 0.7) * 0.05) - react * 0.5;
   w.head.rotation.y = Math.sin(time * 0.5) * 0.25 * (1 - m);
-  w.jaw.rotation.x = attack >= 0 ? kf(attack, [[0, 0.05], [0.35, 0.65], [0.6, 0], [1, 0.05]]) : 0.05 + m * Math.abs(Math.sin(time * 8)) * 0.15;
+  w.jaw.rotation.x = attack >= 0 ? kf(attack, [[0, 0.05], [0.35, 0.65], [0.6, 0], [1, 0.05]]) : 0.05 + m * Math.abs(Math.sin(time * 8)) * 0.15 + react * 0.5;
   w.tail.forEach((t, i) => {
     t.rotation.y = Math.sin(time * (m > 0.3 ? 9 : 3) - i) * 0.25;
-    t.rotation.x = i === 0 ? -0.6 + 0.5 * m : 0.12;
+    t.rotation.x = (i === 0 ? -0.6 + 0.5 * m : 0.12) - react * 0.4;
   });
 }
 
