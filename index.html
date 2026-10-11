@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reino de Ferro ASCII</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root { --fg:#d8d0b8; --dim:#7a7464; --accent:#f0b450; --hp:#e05a4a; --xp:#6fb3e0; --ok:#8fd27a; }
+  html, body { margin:0; height:100%; background:#000; overflow:hidden; color:var(--fg);
+    font-family:'IBM Plex Mono', ui-monospace, monospace; font-size:13px; user-select:none; }
+  canvas { display:block; cursor:crosshair; }
+  .panel { position:fixed; background:rgba(0,0,0,.74); border:1px solid #3a352a; padding:8px 12px;
+    white-space:pre; line-height:1.4; pointer-events:none; }
+  #stats { top:12px; left:12px; }
+  #quest { top:12px; right:12px; width:290px; white-space:pre-wrap; }
+  #log { bottom:12px; left:12px; width:460px; white-space:pre-wrap; }
+  #help { bottom:12px; right:12px; color:var(--dim); }
+  #dialog { display:none; left:50%; bottom:150px; transform:translateX(-50%); width:min(560px, calc(100vw - 32px));
+    box-sizing:border-box; white-space:pre-wrap; pointer-events:auto; border-color:var(--accent); }
+  #dialog b { color:var(--accent); }
+  #dialog .opt { color:var(--accent); cursor:pointer; margin-top:8px; display:inline-block; }
+  .float { position:fixed; pointer-events:none; font-weight:600; transform:translate(-50%,-50%);
+    text-shadow:0 0 4px #000, 0 0 2px #000; white-space:nowrap; }
+  .ebar { position:fixed; pointer-events:none; transform:translate(-50%,-100%); font-size:11px;
+    white-space:pre; color:var(--hp); text-shadow:0 0 3px #000; text-align:center; }
+  #hover { position:fixed; pointer-events:none; color:var(--accent); font-size:12px; text-shadow:0 0 3px #000; }
+  .overlay { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    background:rgba(0,0,0,.82); text-align:center; }
+  .overlay pre { margin:0; line-height:1.15; color:var(--fg); }
+  #intro .title { color:var(--accent); font-size:22px; letter-spacing:.5em; margin:18px 0 6px; font-weight:600; }
+  #intro .sub { color:var(--dim); }
+  #intro .go { margin-top:26px; color:var(--accent); animation:blink 1.2s steps(2) infinite; }
+  #death { display:none; }
+  #death .title { color:var(--hp); font-size:22px; letter-spacing:.4em; margin-top:16px; font-weight:600; }
+  @keyframes blink { 50% { opacity:.25; } }
+  .c-hp{color:var(--hp)} .c-xp{color:var(--xp)} .c-acc{color:var(--accent)} .c-ok{color:var(--ok)} .c-dim{color:var(--dim)}
+  @media (max-width:820px) { #help { display:none; } #log { width:calc(100vw - 48px); } #quest { width:220px; } }
+</style>
+</head>
+<body>
+<div id="stats" class="panel"></div>
+<div id="quest" class="panel"></div>
+<div id="log" class="panel"></div>
+<div id="help" class="panel">CLIQUE   mover / atacar / falar
+WASD     andar        ESPAÇO  golpe
+1        poção        F       falar
+Q / E    girar câmera RODA    zoom
+T        ASCII on/off [ ]     tamanho do caractere
+G        densidade da grama</div>
+<div id="dialog" class="panel"></div>
+<div id="hover"></div>
+
+<div id="intro" class="overlay">
+<pre>
+        |>>>                                 |>>>
+        |                                    |
+    _  _|_  _                            _  _|_  _
+   |;|_|;|_|;|                          |;|_|;|_|;|
+   \\.    .  /                          \\.    .  /
+    \\:  .  /____________________________\\:  .  /
+     ||:   |   _    _    _    _    _    _  ||:   |
+     ||:  .|  |_|  |_|  |_|  |_|  |_|  |_| ||:  .|
+     ||:   |             ______            ||:   |
+     ||: , |            /      \           ||: , |
+     ||:   |           |        |          ||:   |
+ ____||____|___________|________|__________||____|____
+</pre>
+  <div class="title">REINO DE FERRO</div>
+  <div class="sub">um RPG medieval low-poly · aperte T para o modo ASCII</div>
+  <div class="go">[ clique para começar ]</div>
+</div>
+
+<div id="death" class="overlay">
+<pre>
+            _________
+           /         \
+          /   R.I.P.  \
+         |             |
+         |   Aqui jaz  |
+         |   um herói  |
+         |             |
+       __|_____________|__
+</pre>
+  <div class="title">VOCÊ MORREU</div>
+  <div class="c-dim" style="margin-top:8px">Você desperta junto à fogueira da vila...</div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
