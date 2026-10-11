@@ -25,19 +25,21 @@ function makeAtlas() {
   return t;
 }
 
-export function createAscii(sceneRT, near, far) {
+export function createAscii(sceneRT, near, far, bloomTex) {
   const material = new THREE.ShaderMaterial({
     uniforms: {
       tScene: { value: sceneRT.texture }, tDepth: { value: sceneRT.depthTexture }, tGlyphs: { value: makeAtlas() },
       resolution: { value: new THREE.Vector2(innerWidth, innerHeight) },
       cell: { value: 7 }, count: { value: COUNT }, rows: { value: SETS.length },
       asciiOn: { value: 0 }, near: { value: near }, far: { value: far }, exposure: { value: 1.7 },
+      tBloom: { value: bloomTex }, time: { value: 0 }, exposure3d: { value: 1.15 }, bloomStrength: { value: 0.75 },
     },
     vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
     fragmentShader: `
       uniform sampler2D tScene; uniform sampler2D tDepth; uniform sampler2D tGlyphs;
       uniform vec2 resolution; uniform float cell; uniform float count; uniform float rows;
       uniform float asciiOn; uniform float near; uniform float far; uniform float exposure;
+      uniform sampler2D tBloom; uniform float time; uniform float exposure3d; uniform float bloomStrength;
       varying vec2 vUv;
 
       vec3 samp(vec2 uv) { return texture2D(tScene, uv).rgb; }
@@ -47,9 +49,28 @@ export function createAscii(sceneRT, near, far) {
       }
       float h21(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
 
+      // modo 3D: visual "dark fantasy anos 80"
+      vec3 grade(vec2 uv) {
+        vec2 dc = uv - 0.5;
+        float ca = 0.0025 * dot(dc, dc) * 4.0;                  // aberração cromática nas bordas
+        vec3 c = vec3(samp(uv - dc * ca).r, samp(uv).g, samp(uv + dc * ca).b) * exposure3d;
+        c += texture2D(tBloom, uv).rgb * bloomStrength;
+        c = (c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14);   // tone map filmico
+        c = clamp(c, 0.0, 1.0);
+        float l = dot(c, vec3(0.299, 0.587, 0.114));
+        c = mix(c, c * vec3(0.72, 0.86, 1.3), (1.0 - l) * 0.55);  // sombras puxadas para o cobalto
+        c.g = mix(c.g, (c.r + c.b) * 0.5, 0.18);                  // verdes mais apagados
+        c += vec3(0.010, 0.016, 0.045) * (1.0 - smoothstep(0.0, 0.35, l));  // pretos azulados
+        c = pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2));
+        c = mix(vec3(dot(c, vec3(0.3, 0.59, 0.11))), c, 1.12);    // um pouco mais de saturação
+        c *= mix(1.0, smoothstep(0.95, 0.25, length(dc * vec2(1.1, 1.0))), 0.7);  // vinheta
+        c += (h21(uv * resolution + fract(time) * 97.0) - 0.5) * 0.045;          // granulação
+        return c;
+      }
+
       void main() {
         vec3 gam = vec3(1.0 / 2.2);
-        if (asciiOn < 0.5) { gl_FragColor = vec4(pow(samp(vUv), gam), 1.0); return; }
+        if (asciiOn < 0.5) { gl_FragColor = vec4(grade(vUv), 1.0); return; }
 
         vec2 cs = vec2(cell, floor(cell * 1.5));
         vec2 px = vUv * resolution;

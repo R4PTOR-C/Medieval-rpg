@@ -2,24 +2,55 @@
 // ombros, cotovelos, mãos, coxas, joelhos, pés) vestido com peças low-poly,
 // e as funções de pose que animam caminhada, respiração e ataques.
 import * as THREE from 'three';
-import { glow, tagMat, TAG } from './geo.js';
-
-// materiais dos personagens levam a marca CHAR: o shader ASCII os realça
-const matCache = new Map();
-function mat(color, emissive = 0) {
-  const k = color + ':' + emissive;
-  // emissive = a própria cor, fraca: o personagem nunca fica totalmente preto
-  if (!matCache.has(k)) matCache.set(k, tagMat(TAG.CHAR, { color, emissive: emissive || color, emissiveIntensity: emissive ? 1 : 0.28 }));
-  return matCache.get(k);
-}
+import { glow, TAG } from './geo.js';
 import { kf } from './util.js';
 
 const PI = Math.PI;
+
+// ---------------------------------------------------------------- materiais
+// Phong (tem brilho especular) + luz de borda fria: dá o metal polido
+// das capas de fantasia dos anos 80. Todos levam a marca CHAR para o ASCII.
+export const rimLight = { color: { value: new THREE.Color(0x7d9cff) } };
+function charMat(color, { spec = 0x1a1a1a, shine = 12, rim = 0.3, flat = true, emissive = 0, side = THREE.FrontSide } = {}) {
+  const m = new THREE.MeshPhongMaterial({
+    color, specular: spec, shininess: shine, flatShading: flat, side,
+    emissive: emissive || color, emissiveIntensity: emissive ? 1 : 0.1,
+    blending: THREE.NoBlending, opacity: TAG.CHAR,
+  });
+  const rimStrength = { value: rim };
+  m.onBeforeCompile = sh => {
+    sh.uniforms.uRimColor = rimLight.color; sh.uniforms.uRim = rimStrength;
+    sh.fragmentShader = 'uniform vec3 uRimColor; uniform float uRim;\n' + sh.fragmentShader.replace('#include <opaque_fragment>', `
+      float rimF = 1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0);
+      outgoingLight += uRimColor * pow(rimF, 3.0) * uRim;
+      #include <opaque_fragment>`);
+  };
+  return m;
+}
+const matCache = new Map();
+function mat(color, emissive = 0) {          // material genérico (couro, pano, osso, pelo)
+  const k = color + ':' + emissive;
+  if (!matCache.has(k)) matCache.set(k, charMat(color, { emissive, rim: 0.28 }));
+  return matCache.get(k);
+}
+// metais: superfície lisa, reflexo forte e azulado
+const METAL = {
+  steel: () => charMat(0x343b4a, { spec: 0xb8ccff, shine: 80, rim: 0.55, flat: false }),
+  steelD: () => charMat(0x1f2430, { spec: 0x8098d8, shine: 50, rim: 0.45, flat: false }),
+  gold: () => charMat(0x7a5a22, { spec: 0xffd890, shine: 60, rim: 0.3, flat: false }),
+  blade: () => charMat(0x8f9aaa, { spec: 0xffffff, shine: 110, rim: 0.8, flat: false, emissive: 0x141c30 }),
+};
+
 const bx = (w, h, d) => new THREE.BoxGeometry(w, h, d);
 const cyl = (rt, rb, h, s = 8, open = false) => new THREE.CylinderGeometry(rt, rb, h, s, 1, open);
 const sph = (r, ws = 8, hs = 6, ...rest) => new THREE.SphereGeometry(r, ws, hs, ...rest);
 const cone = (r, h, s = 6) => new THREE.ConeGeometry(r, h, s);
 const dome = (r, s = 10) => new THREE.SphereGeometry(r, s, 5, 0, PI * 2, 0, PI / 2);
+// perfil 2D [raio, altura] girado em torno do eixo Y: peças arredondadas de armadura
+const lathe = (pts, seg = 18, phiStart = 0, phiLen = PI * 2) =>
+  new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r, y)), seg, phiStart, phiLen);
+// faixa de esfera (uma "lâmina" de ombreira)
+const band = (r, from, size, seg = 18) => new THREE.SphereGeometry(r, seg, 4, 0, PI * 2, from, size);
 
 // junta (pivô) filha de `parent`
 function J(parent, x = 0, y = 0, z = 0) {
@@ -57,33 +88,22 @@ const HUMAN = { hipH: 0.9, spineLen: 0.2, chestLen: 0.32, shoulderW: 0.27, upper
 
 // ---------------------------------------------------------------- armas
 
-function makeSword({ blade = 0xdfe6f2, guard = 0xc9a043, grip = 0x4a2e1a, len = 0.85, width = 0.035 } = {}) {
+function makeSword({ blade = null, guard = 0xc9a043, grip = 0x4a2e1a, len = 0.85, width = 0.035, gripLen = 0.16, guardW = 0.26 } = {}) {
   const g = new THREE.Group();
   const s = new THREE.Shape();
-  s.moveTo(-width, 0); s.lineTo(width, 0); s.lineTo(width * 0.8, len * 0.85); s.lineTo(0, len);
-  s.lineTo(-width * 0.8, len * 0.85); s.closePath();
-  const bg = new THREE.ExtrudeGeometry(s, { depth: 0.012, bevelEnabled: true, bevelThickness: 0.006, bevelSize: 0.006, bevelSegments: 1 });
+  s.moveTo(-width, 0); s.lineTo(width, 0); s.lineTo(width * 0.85, len * 0.88); s.lineTo(0, len);
+  s.lineTo(-width * 0.85, len * 0.88); s.closePath();
+  const bg = new THREE.ExtrudeGeometry(s, { depth: 0.012, bevelEnabled: true, bevelThickness: 0.007, bevelSize: 0.007, bevelSegments: 2 });
   bg.translate(0, 0, -0.006);
-  const bladeM = tagMat(TAG.CHAR, { color: blade, emissive: 0x2a3040 });
-  P(g, bg, bladeM, 0, 0, 0.1, PI / 2, 0, 0);
-  P(g, bx(0.012, 0.03, len * 0.6), mat(0x7a8090), 0, 0, 0.1 + len * 0.35);          // sulco
-  P(g, bx(0.26, 0.035, 0.035), mat(guard), 0, 0, 0.09);                              // guarda
-  for (const sx of [-1, 1]) P(g, sph(0.022, 6, 4), mat(guard), sx * 0.13, 0, 0.09);
-  P(g, cyl(0.018, 0.018, 0.16, 6), mat(grip), 0, 0, 0, PI / 2, 0, 0);                 // empunhadura
-  P(g, sph(0.03, 8, 6), mat(guard), 0, 0, -0.09);                                    // pomo
-  return g;
-}
-
-function makeKiteShield(field = 0x23407a, trim = 0xc9a043) {
-  const g = new THREE.Group();
-  const s = new THREE.Shape();
-  s.moveTo(-0.24, 0.22); s.lineTo(0.24, 0.22);
-  s.quadraticCurveTo(0.27, -0.2, 0, -0.52); s.quadraticCurveTo(-0.27, -0.2, -0.24, 0.22);
-  const geo = new THREE.ExtrudeGeometry(s, { depth: 0.035, bevelEnabled: true, bevelThickness: 0.015, bevelSize: 0.018, bevelSegments: 1 });
-  P(g, geo, mat(field));
-  P(g, bx(0.055, 0.6, 0.012), mat(trim), 0, -0.13, 0.058);
-  P(g, bx(0.34, 0.055, 0.012), mat(trim), 0, 0.04, 0.058);
-  P(g, sph(0.05, 8, 6), mat(trim), 0, 0.04, 0.06, 0, 0, 0, 1, 1, 0.5);
+  const z0 = gripLen / 2 + 0.03;
+  P(g, bg, blade ? mat(blade) : METAL.blade(), 0, 0, z0, PI / 2, 0, 0);
+  P(g, bx(0.012, 0.03, len * 0.65), METAL.steelD(), 0, 0, z0 + len * 0.36);              // sulco
+  const gm = typeof guard === 'number' ? mat(guard) : guard;
+  P(g, bx(guardW, 0.035, 0.04), gm, 0, 0, z0 - 0.01);                                   // guarda
+  for (const sx of [-1, 1]) P(g, sph(0.026, 8, 6), gm, sx * guardW / 2, 0, z0 - 0.01);
+  P(g, cyl(0.019, 0.019, gripLen, 8), mat(grip), 0, 0, 0, PI / 2, 0, 0);                  // empunhadura
+  for (let i = 0; i < Math.floor(gripLen / 0.04); i++) P(g, cyl(0.022, 0.022, 0.008, 8), mat(0x2a1a10), 0, 0, -gripLen / 2 + 0.02 + i * 0.04, PI / 2, 0, 0);
+  P(g, sph(0.034, 10, 8), gm, 0, 0, -gripLen / 2 - 0.03);                               // pomo
   return g;
 }
 
@@ -91,88 +111,83 @@ function makeKiteShield(field = 0x23407a, trim = 0xc9a043) {
 
 export function makeKnight() {
   const r = makeRig(HUMAN);
-  const steel = mat(0xb4bccb), steelD = mat(0x6f7686), mail = mat(0x55595f), gold = mat(0xc9a043);
-  const red = mat(0x8e1c1c), redD = mat(0x6a1414), leather = mat(0x5a3a22), dark = glow(0x050507);
+  const steel = METAL.steel(), steelD = METAL.steelD(), gold = METAL.gold();
+  const steelDS = charMat(0x343b4a, { spec: 0xb8ccff, shine: 80, rim: 0.55, flat: false, side: THREE.DoubleSide });
+  const mail = charMat(0x2e3138, { spec: 0x666e80, shine: 25, rim: 0.35 });
+  const red = mat(0x5a0c12), redD = mat(0x3a070c), leather = mat(0x3a2416), dark = glow(0x020205);
 
-  // quadril: cota de malha, cinto, bolsa, escarcelas
-  P(r.hips, cyl(0.19, 0.2, 0.16, 10), mail);
-  P(r.hips, cyl(0.205, 0.205, 0.06, 12), leather, 0, 0.07, 0);
-  P(r.hips, bx(0.07, 0.06, 0.02), gold, 0, 0.07, 0.205);
-  P(r.hips, bx(0.1, 0.1, 0.06), leather, 0.17, 0, 0.1, 0, 0.6, 0);
-  for (const s of [-1, 1]) P(r.hips, bx(0.12, 0.17, 0.22), steelD, s * 0.2, -0.06, 0, 0, 0, s * 0.25);
-  // tabardo (frente e costas), com cruz dourada
-  const tabF = J(r.hips, 0, 0.04, 0.19), tabB = J(r.hips, 0, 0.04, -0.19);
-  P(tabF, bx(0.24, 0.44, 0.02), red, 0, -0.22, 0);
-  P(tabF, bx(0.25, 0.03, 0.025), gold, 0, -0.43, 0);
-  P(tabF, bx(0.04, 0.2, 0.025), gold, 0, -0.17, 0.004);
-  P(tabF, bx(0.13, 0.04, 0.025), gold, 0, -0.13, 0.004);
-  P(tabB, bx(0.26, 0.46, 0.02), redD, 0, -0.23, 0);
+  // --- quadril: malha, cinto, escarcelas presas às coxas
+  P(r.hips, cyl(0.19, 0.21, 0.18, 14), mail, 0, -0.02, 0);
+  P(r.hips, cyl(0.205, 0.205, 0.05, 18), leather, 0, 0.06, 0, 0, 0, 0, 1.06, 1, 0.82);
+  P(r.hips, bx(0.07, 0.06, 0.02), gold, 0, 0.06, 0.17);
+  const tabF = J(r.hips, 0, 0.03, 0.15), tabB = J(r.hips, 0, 0.03, -0.16);
+  P(tabF, bx(0.2, 0.5, 0.015), red, 0, -0.25, 0);
+  P(tabB, bx(0.24, 0.52, 0.015), redD, 0, -0.26, 0);
   r.tabard = [tabF, tabB];
+  for (const [A, s] of [[r.L, -1], [r.R, 1]]) {
+    for (let i = 0; i < 3; i++) {
+      P(A.thigh, cyl(0.12 - i * 0.005, 0.13 - i * 0.004, 0.08, 14, true), steelDS, 0, 0.02 - i * 0.07, 0.015, 0.12, 0, s * 0.05, 1.05, 1, 0.9);
+    }
+  }
 
-  // tronco: faixa abdominal e peitoral com quilha
-  P(r.spine, cyl(0.2, 0.19, 0.2, 10), steel, 0, 0.1, 0, 0, 0, 0, 1.08, 1, 0.8);
-  P(r.chest, cyl(0.25, 0.2, 0.34, 12), steel, 0, 0.16, 0, 0, 0, 0, 1, 1, 0.72);
-  P(r.chest, bx(0.035, 0.3, 0.04), steel, 0, 0.16, 0.162, -0.12, 0, 0);
-  P(r.chest, bx(0.4, 0.03, 0.3), gold, 0, 0.01, 0, 0, 0, 0, 1, 1, 0.9);
-  P(r.chest, cyl(0.12, 0.15, 0.08, 10), steelD, 0, 0.34, 0);                        // gorjal
+  // --- tronco: lâminas do abdômen, peitoral arredondado com quilha, gorjal
+  for (let i = 0; i < 3; i++) P(r.spine, cyl(0.19 + i * 0.006, 0.2 + i * 0.006, 0.08, 20), i === 2 ? steel : steelD, 0, 0.02 + i * 0.07, 0, 0, 0, 0, 1.1, 1, 0.8);
+  P(r.chest, lathe([[0.17, 0], [0.195, 0.05], [0.22, 0.13], [0.228, 0.21], [0.215, 0.28], [0.17, 0.33], [0.12, 0.35]], 22), steel, 0, -0.01, 0, 0, 0, 0, 1.12, 1, 0.8);
+  P(r.chest, bx(0.022, 0.3, 0.03), steel, 0, 0.16, 0.175, -0.16, 0, 0);
+  for (const s of [-1, 1]) P(r.chest, bx(0.012, 0.22, 0.02), gold, s * 0.08, 0.17, 0.165, -0.14, s * 0.4, 0);
+  P(r.chest, lathe([[0.2, 0], [0.16, 0.04], [0.12, 0.07], [0.09, 0.1]], 20), steelD, 0, 0.3, 0, 0, 0, 0, 1.1, 1, 0.95);
 
-  // capa em segmentos (animada em animateCape)
+  // --- capa longa e escura, presa nos ombros
   r.cape = [];
-  let parent = J(r.chest, 0, 0.3, -0.17);
-  for (let i = 0; i < 4; i++) {
-    const seg = J(parent, 0, i ? -0.21 : 0, 0);
-    P(seg, bx(0.42 + i * 0.05, 0.22, 0.025), i % 2 ? redD : red, 0, -0.105, 0);
+  let parent = J(r.chest, 0, 0.32, -0.19);
+  for (let i = 0; i < 5; i++) {
+    const seg = J(parent, 0, i ? -0.2 : 0, 0);
+    P(seg, bx(0.46 + i * 0.05, 0.21, 0.02), i % 2 ? redD : red, 0, -0.1, 0);
     r.cape.push(seg); parent = seg;
   }
 
-  // elmo: cilindro + cúpula, viseira, respiros, faixa dourada e penacho
-  P(r.neck, cyl(0.07, 0.08, 0.1, 8), mail, 0, 0.04, 0);
-  P(r.head, cyl(0.135, 0.14, 0.27, 12), steel, 0, 0.14, 0);
-  P(r.head, dome(0.137, 12), steel, 0, 0.275, 0, 0, 0, 0, 1, 0.55, 1);
-  P(r.head, bx(0.22, 0.03, 0.03), dark, 0, 0.17, 0.128);
-  for (const s of [-1, 1]) for (let i = 0; i < 3; i++) P(r.head, bx(0.014, 0.045, 0.03), dark, s * (0.035 + i * 0.026), 0.08, 0.126);
-  P(r.head, cyl(0.143, 0.143, 0.03, 12), gold, 0, 0.235, 0);
-  P(r.head, bx(0.03, 0.2, 0.012), gold, 0, 0.12, 0.142);
-  for (let i = 0; i < 7; i++) {
-    const t = i / 6;
-    P(r.head, bx(0.05, 0.08, 0.09), i % 2 ? redD : red, 0, 0.36 + Math.sin(t * PI) * 0.07 - t * 0.12, 0.04 - t * 0.27, -t * 1.1, 0, 0);
-  }
+  // --- elmo: bacinete arredondado, viseira em "focinho", fenda, crista
+  P(r.neck, cyl(0.075, 0.085, 0.1, 10), mail, 0, 0.04, 0);
+  P(r.head, lathe([[0.1, -0.03], [0.13, 0.0], [0.148, 0.07], [0.152, 0.15], [0.148, 0.21], [0.132, 0.27], [0.1, 0.32], [0.055, 0.35], [0.0, 0.36]], 22), steel, 0, 0, 0);
+  P(r.head, lathe([[0.15, 0.03], [0.17, 0.08], [0.182, 0.13], [0.175, 0.18], [0.155, 0.225]], 16, -1.0, 2.0), steelDS, 0, 0, 0, 0, 0, 0, 1, 1, 1.12);
+  P(r.head, bx(0.22, 0.02, 0.05), dark, 0, 0.162, 0.192);
+  for (const s of [-1, 1]) for (let i = 0; i < 3; i++) P(r.head, bx(0.012, 0.035, 0.04), dark, s * (0.04 + i * 0.026), 0.085, 0.185 - i * 0.014, 0, s * 0.3, 0);
+  P(r.head, new THREE.TorusGeometry(0.152, 0.011, 6, 20, PI), steel, 0, 0.2, 0, 0, PI / 2, 0);
+  P(r.head, new THREE.TorusGeometry(0.15, 0.008, 6, 22), gold, 0, 0.03, 0, PI / 2, 0, 0);
 
-  // braços
+  // --- braços: ombreiras em camadas, cotoveleira com aba, manopla
   for (const [A, s] of [[r.L, -1], [r.R, 1]]) {
-    P(A.shoulder, dome(0.145), steel, s * 0.03, 0.03, 0, 0, 0, -s * 0.35, 1.1, 0.95, 1.2);
-    P(A.shoulder, dome(0.13), steelD, s * 0.05, -0.05, 0, 0, 0, -s * 0.5, 1.05, 0.7, 1.1);
-    P(A.shoulder, cyl(0.062, 0.056, 0.27, 8), mail, 0, -0.14, 0);
-    P(A.shoulder, cyl(0.068, 0.064, 0.13, 8), steel, 0, -0.2, 0);
-    P(A.elbow, sph(0.07, 8, 6), steel);
-    P(A.elbow, bx(0.025, 0.09, 0.09), steelD, s * 0.06, 0, -0.02);
-    P(A.elbow, cyl(0.064, 0.054, 0.24, 8), steel, 0, -0.13, 0);
-    P(A.hand, cyl(0.062, 0.075, 0.06, 8), steel, 0, 0.02, 0);
-    P(A.hand, bx(0.085, 0.11, 0.1), steelD, 0, -0.05, 0.01);
+    const pa = J(A.shoulder, s * 0.035, 0.03, 0);
+    pa.rotation.z = -s * 0.4;
+    P(pa, band(0.16, 0, PI * 0.42, 20), steel, 0, 0, 0, 0, 0, 0, 1.15, 0.9, 1.25);
+    for (let i = 0; i < 3; i++) P(pa, band(0.165 + i * 0.006, PI * (0.4 + i * 0.07), PI * 0.08, 20), i % 2 ? steelD : steel, 0, -0.02 - i * 0.025, 0, 0, 0, 0, 1.15, 0.9, 1.25);
+    P(pa, new THREE.TorusGeometry(0.165, 0.008, 6, 22), gold, 0, -0.105, 0, PI / 2, 0, 0, 1.18, 1.3, 1);
+    P(A.shoulder, cyl(0.062, 0.058, 0.27, 12), mail, 0, -0.14, 0);
+    P(A.shoulder, cyl(0.07, 0.066, 0.15, 14), steel, 0, -0.2, 0);
+    P(A.elbow, sph(0.074, 14, 10), steel);
+    P(A.elbow, cone(0.085, 0.035, 14), steelD, s * 0.055, 0, -0.015, 0, 0, s * PI / 2);
+    P(A.elbow, lathe([[0.068, 0], [0.066, -0.08], [0.058, -0.2], [0.054, -0.25]], 14), steel);
+    P(A.hand, cyl(0.075, 0.058, 0.07, 14), steel, 0, 0.03, 0);
+    P(A.hand, bx(0.085, 0.1, 0.1), steelD, 0, -0.045, 0.01);
+    for (let i = 0; i < 3; i++) P(A.hand, bx(0.09, 0.025, 0.105), steel, 0, -0.01 - i * 0.03, 0.012);
   }
-  // pernas
-  for (const [A] of [[r.L], [r.R]]) {
-    P(A.thigh, cyl(0.088, 0.072, 0.42, 8), steel, 0, -0.21, 0);
-    P(A.knee, sph(0.074, 8, 6), steel, 0, 0, 0.015);
-    P(A.knee, bx(0.1, 0.06, 0.03), steelD, 0, 0.01, 0.065);
-    P(A.knee, cyl(0.068, 0.054, 0.4, 8), steel, 0, -0.2, 0);
-    P(A.foot, bx(0.1, 0.07, 0.24), steelD, 0, 0, 0.045);
-    P(A.foot, bx(0.075, 0.05, 0.08), steel, 0, -0.005, 0.19);
+  // --- pernas: coxote, joelheira com aba, greva moldada, escarpe em lâminas
+  for (const [A, s] of [[r.L, -1], [r.R, 1]]) {
+    P(A.thigh, cyl(0.092, 0.076, 0.4, 14), steel, 0, -0.22, 0.005);
+    P(A.knee, sph(0.08, 14, 10), steel, 0, 0, 0.02);
+    P(A.knee, cone(0.09, 0.03, 14), steelD, s * 0.06, 0, 0.01, 0, 0, s * PI / 2);
+    P(A.knee, lathe([[0.066, 0.0], [0.072, -0.08], [0.075, -0.17], [0.066, -0.3], [0.056, -0.4]], 16), steel);
+    for (let i = 0; i < 3; i++) P(A.foot, bx(0.1 - i * 0.008, 0.06 - i * 0.008, 0.08), i % 2 ? steelD : steel, 0, -0.005 - i * 0.006, -0.03 + i * 0.07);
+    P(A.foot, cone(0.04, 0.1, 10), steel, 0, -0.025, 0.24, PI / 2, 0, 0, 1, 1, 0.6);
   }
 
-  // espada na mão direita, escudo no antebraço esquerdo
-  const sword = makeSword(); sword.position.set(0, -0.06, 0); r.R.hand.add(sword);
-  const shield = makeKiteShield();
-  shield.position.set(-0.085, -0.15, 0);
-  shield.rotation.set(PI / 2, 0, -PI / 2 + 0.35, 'ZYX');
-  r.L.elbow.add(shield);
+  // --- montante na mão direita
+  r.sword = makeSword({ len: 1.2, width: 0.045, gripLen: 0.26, guardW: 0.36, guard: gold, grip: 0x2a1810 });
+  r.sword.position.set(0, -0.06, 0);
+  r.R.hand.add(r.sword);
 
-  // lanterna na cintura + luz que acompanha o herói
-  const lant = J(r.hips, -0.22, -0.02, 0.06);
-  P(lant, bx(0.09, 0.02, 0.09), mat(0x2a2a2a), 0, 0.02, 0);
-  P(lant, bx(0.06, 0.09, 0.06), glow(0xffd080), 0, -0.04, 0);
-  P(lant, bx(0.09, 0.02, 0.09), mat(0x2a2a2a), 0, -0.1, 0);
-  const light = new THREE.PointLight(0xffc890, 14, 16, 2); light.position.set(0.2, 1.7, 0.9);
+  // --- luz pessoal (lanterna) que acompanha o herói
+  const light = new THREE.PointLight(0xffc890, 7, 14, 2); light.position.set(0.3, 2.8, 1.4);
   r.root.add(light);
   return r;
 }
@@ -354,6 +369,7 @@ export function poseHumanoid(r, { phase = 0, move = 0, attack = -1, time = 0, sh
     r.L.shoulder.rotation.set(s * 0.45 * m + j(4), 0, -0.12);
     r.L.elbow.rotation.set(-0.25 - Math.max(0, -s) * 0.3 * m, 0, 0);
   }
+  if (r.sword) r.sword.rotation.x = 0;
   let sx = -s * 0.4 * m - 0.12, ex = -0.4, chY = 0, spX = 0;
   if (attack >= 0) {
     sx = kf(attack, [[0, sx], [0.3, -2.7], [0.55, -0.45], [1, sx]]);
@@ -402,4 +418,23 @@ export function poseElder(r, time) {
   r.R.elbow.rotation.set(-1.05, 0, 0);
   r.marker.position.y = 2.5 + Math.sin(time * 3) * 0.12;
   r.marker.rotation.y = time * 2;
+}
+
+// Ajoelhado com a espada cravada no chão (tela de título)
+export function poseKneel(r, time) {
+  const br = Math.sin(time * 1.6) * 0.012;
+  r.hips.position.y = 0.52;
+  r.hips.rotation.set(0, 0.15, 0);
+  r.spine.rotation.set(0.22 + br, -0.1, 0);
+  r.chest.rotation.set(0.12 + br, -0.05, 0);
+  r.head.rotation.set(0.42 + br * 2, 0.1, 0);
+  r.L.thigh.rotation.set(-1.45, 0, -0.08); r.L.knee.rotation.set(1.5, 0, 0); r.L.foot.rotation.set(0.0, 0, 0);
+  r.R.thigh.rotation.set(0.15, 0, 0.12); r.R.knee.rotation.set(1.55, 0, 0); r.R.foot.rotation.set(0.9, 0, 0);
+  // mão direita no punho da espada, plantada à frente; esquerda apoiada no joelho
+  r.R.shoulder.rotation.set(-1.0, 0, -0.12); r.R.elbow.rotation.set(-0.45, 0, 0);
+  r.L.shoulder.rotation.set(-0.85, 0, -0.05); r.L.elbow.rotation.set(-0.75, 0, 0);
+  // ângulo total do braço = -1.45 rad; +PI/2 aponta a lâmina para baixo
+  if (r.sword) r.sword.rotation.set(PI / 2 + 1.45, 0, 0);
+  if (r.tabard) { r.tabard[0].rotation.x = -1.2; r.tabard[1].rotation.x = 0.2; }
+  if (r.cape) r.cape.forEach((seg, i) => { seg.rotation.x = (i === 0 ? 0.35 : 0.12) + Math.sin(time * 1.5 - i) * 0.03; });
 }

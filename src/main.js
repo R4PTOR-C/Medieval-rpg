@@ -5,7 +5,8 @@ import { RUINS, FIRE, SPAWN, ELDER, heightAt, groundY, canStand, moveEntity, col
 import { buildWorld } from './world.js';
 import { cutout } from './geo.js';
 import { createAscii } from './ascii.js';
-import { makeKnight, makeSkeleton, makeWolf, makeElder, poseHumanoid, poseWolf, poseElder, animateCape } from './models.js';
+import { makeKnight, makeSkeleton, makeWolf, makeElder, poseHumanoid, poseWolf, poseElder, poseKneel, animateCape } from './models.js';
+import { createBloom } from './post.js';
 
 // =====================================================================
 // renderer e cena
@@ -19,14 +20,15 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.prepend(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x060914);
-scene.fog = new THREE.FogExp2(0x0a0f1e, 0.014);
+scene.background = new THREE.Color(0x02040c);
+scene.fog = new THREE.FogExp2(0x0c1840, 0.016);
 const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, NEAR, FAR);
 camera.layers.enable(1); // camada 1 = grama/flores (não entra no reflexo da água)
 
 const sceneRT = new THREE.WebGLRenderTarget(innerWidth, innerHeight);
 sceneRT.depthTexture = new THREE.DepthTexture(innerWidth, innerHeight);
-const ascii = createAscii(sceneRT, NEAR, FAR);
+const bloom = createBloom(innerWidth, innerHeight);
+const ascii = createAscii(sceneRT, NEAR, FAR, bloom.texture);
 
 const world = buildWorld(scene);
 
@@ -34,11 +36,12 @@ const world = buildWorld(scene);
 // entidades
 // =====================================================================
 const player = {
-  name: 'Sir Roland', x: SPAWN.x, z: SPAWN.z, rot: Math.PI, hp: 100, maxHp: 100, level: 1, xp: 0,
+  name: 'Sir Roland', x: SPAWN.x, z: SPAWN.z, rot: 0.45, hp: 100, maxHp: 100, level: 1, xp: 0,
   gold: 0, potions: 3, dmg: [10, 16], atkCd: 0, swing: 0, phase: 0, moveAmt: 0,
   moveTarget: null, attackTarget: null, talkPending: false, dead: false, deadT: 0, rig: makeKnight(),
 };
 scene.add(player.rig.root);
+const INTRO_ROT = 0.45; // de frente para a câmera, de costas para a lua
 const xpNeeded = () => 80 + (player.level - 1) * 70;
 
 const elder = { name: 'Ancião Aldric', x: ELDER.x, z: ELDER.z, rig: makeElder() };
@@ -286,7 +289,7 @@ renderer.domElement.addEventListener('mousedown', e => {
 });
 
 $('intro').addEventListener('click', () => {
-  $('intro').style.display = 'none'; started = true;
+  $('intro').style.display = 'none'; document.body.classList.remove('intro'); started = true;
   log('Bem-vindo ao Reino de Ferro.', 'c-acc');
   log('Fale com o Ancião Aldric (o velho com o "!" amarelo).', 'c-dim');
   updateHud();
@@ -360,7 +363,7 @@ function updatePlayer(dt, time) {
   }
   rig.root.position.set(p.x, groundY(p.x, p.z), p.z);
   rig.root.rotation.y = p.rot;
-  poseHumanoid(rig, { phase: p.phase, move: p.moveAmt, attack: p.swing > 0 ? 1 - p.swing : -1, time, shield: true });
+  poseHumanoid(rig, { phase: p.phase, move: p.moveAmt, attack: p.swing > 0 ? 1 - p.swing : -1, time });
   animateCape(rig, p.moveAmt, time);
 }
 
@@ -447,7 +450,7 @@ function updateHover() {
 
 function updateBars() {
   for (const e of enemies) {
-    const show = !e.dead && (e.hp < e.t.hp || e.type === 'lord' || e === hovered);
+    const show = started && !e.dead && (e.hp < e.t.hp || e.type === 'lord' || e === hovered);
     if (!show) { if (e.bar) e.bar.style.display = 'none'; continue; }
     if (!e.bar) { e.bar = document.createElement('div'); e.bar.className = 'ebar'; document.body.appendChild(e.bar); }
     const s = toScreen(e.x, groundY(e.x, e.z) + (e.t.barH || 2.3), e.z);
@@ -459,7 +462,8 @@ function updateBars() {
 
 const clock = new THREE.Clock();
 const camTarget = new THREE.Vector3(player.x, 0, player.z);
-let hudTimer = 0;
+let hudTimer = 0, introBlend = 0;
+const camPos = new THREE.Vector3(), camLook = new THREE.Vector3(), introPos = new THREE.Vector3(), introLook = new THREE.Vector3();
 
 function frame() {
   requestAnimationFrame(frame);
@@ -478,12 +482,11 @@ function frame() {
     hudTimer += dt; if (hudTimer > 0.25) { hudTimer = 0; updateHud(); }
     if (!player.dead && player.hp < player.maxHp && !enemies.some(e => e.state === 'chase')) player.hp = Math.min(player.maxHp, player.hp + dt * 1.5);
   } else {
-    camYaw += dt * 0.08;
-    poseHumanoid(player.rig, { time, shield: true });
-    animateCape(player.rig, 0, time);
+    poseKneel(player.rig, time);
     player.rig.root.position.set(player.x, groundY(player.x, player.z), player.z);
     player.rig.root.rotation.y = player.rot;
   }
+  introBlend = started ? Math.min(1, introBlend + dt / 2.2) : 0;
   poseElder(elder.rig, time);
   elder.rig.marker.visible = [0, 2, 4].includes(quest.stage);
   for (const k of pickups) { k.mesh.rotation.y = time * 2; k.mesh.position.y = groundY(k.x, k.z) + 0.25 + Math.sin(time * 3) * 0.08; }
@@ -492,8 +495,20 @@ function frame() {
   // câmera
   camTarget.lerp(tmpV.set(player.x, groundY(player.x, player.z), player.z), 1 - Math.exp(-dt * 8));
   const cd = camDist * Math.cos(camPitch);
-  camera.position.set(camTarget.x + Math.sin(camYaw) * cd, camTarget.y + camDist * Math.sin(camPitch), camTarget.z + Math.cos(camYaw) * cd);
-  camera.lookAt(camTarget.x, camTarget.y + 1, camTarget.z);
+  camPos.set(camTarget.x + Math.sin(camYaw) * cd, camTarget.y + camDist * Math.sin(camPitch), camTarget.z + Math.cos(camYaw) * cd);
+  camLook.set(camTarget.x, camTarget.y + 1, camTarget.z);
+  if (introBlend < 1) {
+    // plano de cinema: câmera baixa à frente do cavaleiro ajoelhado, céu ao fundo
+    const fx = Math.sin(INTRO_ROT), fz = Math.cos(INTRO_ROT), gy = groundY(SPAWN.x, SPAWN.z);
+    const sway = Math.sin(time * 0.15) * 0.25;
+    introPos.set(SPAWN.x + fx * 3.6 + fz * (0.7 + sway), gy + 0.35, SPAWN.z + fz * 3.6 - fx * (0.7 + sway));
+    introLook.set(SPAWN.x - fx * 0.5 - fz * 0.9, gy + 2.1, SPAWN.z - fz * 0.5 + fx * 0.9);
+    const t = introBlend * introBlend * (3 - 2 * introBlend);
+    camPos.lerpVectors(introPos, camPos, t);
+    camLook.lerpVectors(introLook, camLook, t);
+  }
+  camera.position.copy(camPos);
+  camera.lookAt(camLook);
 
   world.update(dt, time, camTarget, player);
 
@@ -501,12 +516,13 @@ function frame() {
   tmpV.set(player.x, groundY(player.x, player.z) + 1.0, player.z).project(camera);
   cutout.center.value.set((tmpV.x + 1) / 2 * innerWidth, (tmpV.y + 1) / 2 * innerHeight);
   cutout.depth.value = tmpV.z * 0.5 + 0.5;
-  cutout.radius.value = 1300 / camDist;
+  cutout.radius.value = introBlend < 1 ? 0 : 1300 / camDist;
 
   // render: cena -> textura -> ASCII
   renderer.setRenderTarget(sceneRT);
   renderer.render(scene, camera);
-  renderer.setRenderTarget(null);
+  bloom.render(renderer, sceneRT.texture);
+  ascii.material.uniforms.time.value = time;
   renderer.render(ascii.scene, ascii.camera);
 
   updateHover();
@@ -523,10 +539,11 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
   sceneRT.setSize(innerWidth, innerHeight);
   ascii.setSize(innerWidth, innerHeight);
+  bloom.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
 });
 
 // ganchos para testes automatizados
-window.__game = { player, enemies, quest, world, setCam: (y, d, p) => { camYaw = y; camDist = d; if (p) camPitch = p; } };
+window.__game = { player, enemies, quest, world, skipIntro: () => { introBlend = 1; }, setCam: (y, d, p) => { camYaw = y; camDist = d; if (p) camPitch = p; } };
 updateHud();
 frame();

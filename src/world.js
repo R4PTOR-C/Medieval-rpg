@@ -28,9 +28,10 @@ export function buildWorld(scene) {
   }
 
   // ------------------------------------------------------------ luz e céu
-  scene.add(new THREE.HemisphereLight(0x4a5a90, 0x141a10, 0.45));
+  // noite cobalto: lua fria e forte (realça o metal), ambiente quase preto-azulado
+  scene.add(new THREE.HemisphereLight(0x2a3c88, 0x05070c, 0.55));
   const MOON_DIR = new THREE.Vector3(-0.3, 0.72, -0.62).normalize();
-  const moonLight = new THREE.DirectionalLight(0xb0c0f0, 0.9);
+  const moonLight = new THREE.DirectionalLight(0x9fb6ff, 1.7);
   moonLight.castShadow = true;
   moonLight.shadow.mapSize.set(2048, 2048);
   Object.assign(moonLight.shadow.camera, { left: -28, right: 28, top: 28, bottom: -28, near: 1, far: 140 });
@@ -40,21 +41,75 @@ export function buildWorld(scene) {
 
   const sky = new THREE.Group(); scene.add(sky);
   {
-    const pos = [];
-    for (let i = 0; i < 900; i++) {
-      const th = rand() * PI * 2, el = Math.asin(rr(0.08, 1));
-      pos.push(Math.cos(th) * Math.cos(el) * 300, Math.sin(el) * 300, Math.sin(th) * Math.cos(el) * 300);
+    // cúpula com gradiente e faixa de Via Láctea
+    const dome = new THREE.Mesh(new THREE.SphereGeometry(320, 32, 16), new THREE.ShaderMaterial({
+      side: THREE.BackSide, depthWrite: false, fog: false,
+      uniforms: { horizon: { value: new THREE.Color(0x0e1c4a) }, zenith: { value: new THREE.Color(0x01030c) } },
+      vertexShader: `varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `
+        uniform vec3 horizon; uniform vec3 zenith; varying vec3 vDir;
+        float h3(vec3 p){ return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
+        float n3(vec3 p){
+          vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(mix(h3(i), h3(i + vec3(1,0,0)), f.x), mix(h3(i + vec3(0,1,0)), h3(i + vec3(1,1,0)), f.x), f.y),
+                     mix(mix(h3(i + vec3(0,0,1)), h3(i + vec3(1,0,1)), f.x), mix(h3(i + vec3(0,1,1)), h3(i + vec3(1,1,1)), f.x), f.y), f.z);
+        }
+        void main(){
+          vec3 d = normalize(vDir);
+          vec3 col = mix(horizon, zenith, pow(clamp(d.y, 0.0, 1.0), 0.45));
+          float band = exp(-pow(dot(d, normalize(vec3(0.45, 0.35, 0.82))) * 4.0, 2.0));
+          float cloud = n3(d * 6.0) * 0.6 + n3(d * 14.0) * 0.4;
+          col += band * vec3(0.10, 0.14, 0.34) * smoothstep(0.3, 0.9, cloud);
+          col += band * vec3(0.04, 0.03, 0.08) * n3(d * 40.0);
+          gl_FragColor = vec4(col, 1.0);
+          #include <colorspace_fragment>
+        }`,
+    }));
+    dome.renderOrder = -1; sky.add(dome);
+
+    // estrelas: muitas pequenas, algumas maiores e quentes, mais densas na Via Láctea
+    const pos = [], col = [], c = new THREE.Color(), band = new THREE.Vector3(0.45, 0.35, 0.82).normalize(), v = new THREE.Vector3();
+    for (let i = 0; i < 4000; i++) {
+      const th = rand() * PI * 2, el = Math.asin(rr(-0.05, 1));
+      v.set(Math.cos(th) * Math.cos(el), Math.sin(el), Math.sin(th) * Math.cos(el));
+      if (Math.abs(v.dot(band)) > 0.25 && rand() < 0.55) continue;
+      pos.push(v.x * 300, v.y * 300, v.z * 300);
+      c.set(rand() < 0.12 ? 0xffd8b0 : rand() < 0.5 ? 0xc8d6ff : 0xffffff).multiplyScalar(rr(0.35, 1.0));
+      col.push(c.r, c.g, c.b);
     }
-    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    sky.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0xc8d4ff, size: 5, sizeAttenuation: false, fog: false })));
-    const moon = new THREE.Mesh(new THREE.SphereGeometry(16, 24, 16), new THREE.MeshBasicMaterial({ color: 0xfff6dc, fog: false }));
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    sky.add(new THREE.Points(g, new THREE.PointsMaterial({ vertexColors: true, size: 2.2, sizeAttenuation: false, fog: false, depthWrite: false })));
+
+    // estrelas-brilho de 4 pontas
+    const sc = document.createElement('canvas'); sc.width = sc.height = 128;
+    const sg = sc.getContext('2d');
+    const core = sg.createRadialGradient(64, 64, 0, 64, 64, 22);
+    core.addColorStop(0, 'rgba(255,255,255,1)'); core.addColorStop(0.25, 'rgba(210,225,255,.7)'); core.addColorStop(1, 'rgba(160,190,255,0)');
+    sg.fillStyle = core; sg.fillRect(0, 0, 128, 128);
+    for (const [w, h] of [[128, 3], [3, 128]]) {
+      const lg = w > h ? sg.createLinearGradient(0, 0, 128, 0) : sg.createLinearGradient(0, 0, 0, 128);
+      lg.addColorStop(0, 'rgba(200,220,255,0)'); lg.addColorStop(0.5, 'rgba(235,242,255,1)'); lg.addColorStop(1, 'rgba(200,220,255,0)');
+      sg.fillStyle = lg; sg.fillRect(64 - w / 2, 64 - h / 2, w, h);
+    }
+    const glintMat = new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(sc), fog: false, depthWrite: false, blending: THREE.AdditiveBlending });
+    for (let i = 0; i < 14; i++) {
+      const th = rand() * PI * 2, el = Math.asin(rr(0.15, 0.95));
+      const s = new THREE.Sprite(glintMat);
+      s.position.set(Math.cos(th) * Math.cos(el) * 290, Math.sin(el) * 290, Math.sin(th) * Math.cos(el) * 290);
+      s.scale.setScalar(i < 3 ? rr(22, 30) : rr(8, 14));
+      sky.add(s);
+    }
+
+    const moon = new THREE.Mesh(new THREE.SphereGeometry(11, 24, 16), new THREE.MeshBasicMaterial({ color: 0xe8eeff, fog: false }));
     moon.position.copy(MOON_DIR).multiplyScalar(280); sky.add(moon);
     const hc = document.createElement('canvas'); hc.width = hc.height = 128;
     const hg = hc.getContext('2d'), gr = hg.createRadialGradient(64, 64, 8, 64, 64, 64);
-    gr.addColorStop(0, 'rgba(255,240,210,.85)'); gr.addColorStop(1, 'rgba(255,240,210,0)');
+    gr.addColorStop(0, 'rgba(190,210,255,.6)'); gr.addColorStop(1, 'rgba(190,210,255,0)');
     hg.fillStyle = gr; hg.fillRect(0, 0, 128, 128);
     const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(hc), fog: false, depthWrite: false, blending: THREE.AdditiveBlending }));
-    halo.scale.setScalar(110); halo.position.copy(moon.position); sky.add(halo);
+    halo.scale.setScalar(90); halo.position.copy(moon.position); sky.add(halo);
   }
 
   // ------------------------------------------------------------ terreno
@@ -88,10 +143,10 @@ export function buildWorld(scene) {
   // ------------------------------------------------------------ água com reflexo
   const water = new Reflector(new THREE.PlaneGeometry(WORLD * 2 + 10, WORLD * 2 + 10), {
     textureWidth: Math.floor(innerWidth / 2), textureHeight: Math.floor(innerHeight / 2),
-    color: 0x0b1a33, clipBias: 0.003, multisample: 0,
+    color: 0x06102a, clipBias: 0.003, multisample: 0,
     shader: {
       uniforms: { color: { value: null }, tDiffuse: { value: null }, textureMatrix: { value: null },
-        time: { value: 0 }, fogColor: { value: new THREE.Color(0x0a0f1e) } },
+        time: { value: 0 }, fogColor: { value: new THREE.Color(0x0c1840) } },
       vertexShader: `
         uniform mat4 textureMatrix; varying vec4 vUv; varying vec3 vWorld; varying float vDepth;
         void main(){
@@ -322,8 +377,12 @@ export function buildWorld(scene) {
     }
     for (let i = 0; i < 4; i++) solid.cyl(0.14, 0.14, 1.4, 7, C.woodL, x + 2.2, y + 0.15 + (i > 2 ? 0.25 : 0), z - 1 + i * 0.32 - (i > 2 ? 0.6 : 0), 0, 0, PI / 2);
     flame = new THREE.Group();
-    flame.add(new THREE.Mesh(new THREE.ConeGeometry(0.38, 1.0, 6), glow(0xff9a30)));
-    const inner = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.7, 5), glow(0xffe080)); inner.position.y = -0.1; flame.add(inner);
+    // chama em camadas translúcidas (o bloom faz o resto)
+    [[0.42, 1.1, 0xff5a10, 0.35], [0.3, 0.95, 0xff9a30, 0.55], [0.16, 0.7, 0xffe0a0, 0.9]].forEach(([r, h, c, o], i) => {
+      const m = new THREE.Mesh(new THREE.ConeGeometry(r, h, 7, 1, true), new THREE.MeshBasicMaterial({
+        color: c, transparent: true, opacity: o, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+      m.position.y = -0.05 * i; m.rotation.y = i; flame.add(m);
+    });
     flame.position.set(x, y + 0.65, z); scene.add(flame);
     colliders.push({ x, z, r: 0.85 }, { x: x + 2.2, z: z - 0.5, r: 0.8 });
     fireLight = addLight(0xff8a30, 34, x, y + 1.4, z, 30);
@@ -597,16 +656,24 @@ export function buildWorld(scene) {
   scene.add(glowB.build(new THREE.MeshBasicMaterial({ vertexColors: true }), false));
 
   // ------------------------------------------------------------ partículas
-  function points(n, color, size) {
+  const softDot = (() => {
+    const c = document.createElement('canvas'); c.width = c.height = 64;
+    const g = c.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.35, 'rgba(255,255,255,.55)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+    return new THREE.CanvasTexture(c);
+  })();
+  function points(n, color, size, { additive = true, opacity = 1 } = {}) {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
-    const p = new THREE.Points(g, new THREE.PointsMaterial({ color, size, sizeAttenuation: false }));
+    const p = new THREE.Points(g, new THREE.PointsMaterial({ color, size, map: softDot, transparent: true, opacity, depthWrite: false,
+      blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending }));
     p.frustumCulled = false; scene.add(p); return p;
   }
-  const embers = points(40, 0xffa040, 6); embers.userData.life = Array.from({ length: 40 }, () => rand());
-  const fireflies = points(60, 0xd8ff70, 5); fireflies.userData.seeds = Array.from({ length: 60 }, () => [rr(-16, 16), rr(-14, 14), rr(0, 100)]);
+  const embers = points(40, 0xffa040, 0.12); embers.userData.life = Array.from({ length: 40 }, () => rand());
+  const fireflies = points(60, 0xd8ff70, 0.3); fireflies.userData.seeds = Array.from({ length: 60 }, () => [rr(-16, 16), rr(-14, 14), rr(0, 100)]);
   const SMOKE_PER = 14;
-  const smoke = points(smokeSources.length * SMOKE_PER, 0x8a90a0, 9);
+  const smoke = points(smokeSources.length * SMOKE_PER, 0x6a7290, 1.6, { additive: false, opacity: 0.35 });
   smoke.userData.life = Array.from({ length: smokeSources.length * SMOKE_PER }, () => rand());
 
   // ------------------------------------------------------------ atualização por quadro
