@@ -7,6 +7,7 @@ import { cutout } from './geo.js';
 import { createAscii } from './ascii.js';
 import { makeKnight, makeSkeleton, makeWolf, makeElder, poseHumanoid, poseWolf, poseElder, poseKneel, animateCape, ATTACKS } from './models.js';
 import { createFx } from './fx.js';
+import { COMBAT } from './combatConfig.js';
 import { initAudio, toggleMute, sfx } from './audio.js';
 import { createBloom } from './post.js';
 
@@ -42,7 +43,8 @@ const trailA = new THREE.Vector3(), trailB = new THREE.Vector3();
 const player = {
   name: 'Sir Roland', x: SPAWN.x, z: SPAWN.z, rot: 0.45, hp: 100, maxHp: 100, level: 1, xp: 0,
   gold: 0, potions: 3, dmg: [10, 16], phase: 0, moveAmt: 0,
-  act: null, combo: 0, comboTimer: 0, queued: null, heavyCd: 0, dodgeCd: 0, invuln: 0, react: 0, kvx: 0, kvz: 0, inDir: null,
+  act: null, combo: 0, comboTimer: 0, queued: null, heavyCd: 0, dodgeCd: 0, invuln: 0, kvx: 0, kvz: 0, inDir: null,
+  react: null, stun: 0, freeze: 0,
   moveTarget: null, attackTarget: null, talkPending: false, dead: false, deadT: 0, rig: makeKnight(),
 };
 scene.add(player.rig.root);
@@ -58,7 +60,7 @@ colliders.push({ x: elder.x, z: elder.z, r: 0.45 });
 const TYPES = {
   skeleton: { name: 'Esqueleto', hp: 42, dmg: [5, 9], speed: 2.4, xp: 26, gold: [2, 8], aggro: 10, reach: 1.35, cd: 1.6, respawn: 30, make: () => makeSkeleton(), humanoid: true, atkDur: 0.85, atkHit: 0.5 },
   wolf: { name: 'Lobo', hp: 30, dmg: [4, 7], speed: 4.3, xp: 18, gold: [0, 2], aggro: 12, reach: 1.45, cd: 1.2, respawn: 30, make: makeWolf, atkDur: 0.6, atkHit: 0.45 },
-  lord: { name: 'Lorde Esqueleto', hp: 260, dmg: [13, 20], speed: 2.7, xp: 220, gold: [60, 100], aggro: 11, reach: 2.1, cd: 1.6, respawn: 120, make: () => makeSkeleton(true), humanoid: true, radius: 0.7, barH: 3.8, atkDur: 1.2, atkHit: 0.55, poise: 0.8 },
+  lord: { name: 'Lorde Esqueleto', hp: 260, dmg: [13, 20], speed: 2.7, xp: 220, gold: [60, 100], aggro: 11, reach: 2.1, cd: 1.6, respawn: 120, make: () => makeSkeleton(true), humanoid: true, radius: 0.7, barH: 3.8, atkDur: 1.2, atkHit: 0.55 },
 };
 const enemies = [];
 function spawnEnemy(type, x, z) {
@@ -66,7 +68,8 @@ function spawnEnemy(type, x, z) {
   const t = TYPES[type];
   const e = { type, t, x, z, sx: x, sz: z, rot: rr(0, 6), hp: t.hp, state: 'idle', cd: 0, phase: 0, moveAmt: 0,
     wander: null, wanderT: rr(1, 4), dead: false, deadT: 0, rig: t.make(), bar: null,
-    atk: null, react: 0, reactSide: 1, flash: 0, kvx: 0, kvz: 0, shattered: false };
+    atk: null, react: null, stun: 0, stagger: 0, staggerMax: 1, freeze: 0, flash: 0, kvx: 0, kvz: 0, shattered: false,
+    poise: COMBAT.enemies[type].poise, poiseT: 0 };
   scene.add(e.rig.root);
   enemies.push(e); return e;
 }
@@ -154,11 +157,23 @@ function tryTalk() {
 }
 
 // =====================================================================
-// "game feel": hitstop (congela), tremor de câmera, flash, câmera lenta
+// "game feel": hitstop local/global, tremor de câmera, flash, câmera lenta.
+// Os números ficam em COMBAT (combatConfig.js).
 // =====================================================================
-const feel = { hitstop: 0, trauma: 0, slowmo: 0, hurtFlash: 0 };
-const addTrauma = v => { feel.trauma = Math.min(1, feel.trauma + v); };
-const freeze = s => { feel.hitstop = Math.max(feel.hitstop, s); };
+const feel = { global: 0, globalCd: 0, trauma: 0, slowmo: 0, hurtFlash: 0 };
+const addTrauma = v => { feel.trauma = Math.min(1, feel.trauma + v * COMBAT.shake.scale); };
+
+// Congela quem participou do impacto (local) e, em impactos fortes, o mundo
+// por um instante (global). Um golpe que acerta vários alvos chama isto uma vez.
+function hitstop(kind, entities) {
+  const H = COMBAT.hitstop[kind];
+  for (const o of entities) o.freeze = Math.max(o.freeze, H.local);
+  if (H.global > 0 && (feel.globalCd <= 0 || H.uncapped)) {
+    feel.global = Math.max(feel.global, H.uncapped ? H.global : Math.min(H.global, COMBAT.hitstop.maxGlobal));
+    feel.globalCd = COMBAT.hitstop.globalCooldown;
+  }
+  if (H.slowmo) feel.slowmo = H.slowmo;
+}
 
 // flash branco por inimigo: troca temporariamente os materiais do rig
 const FLASH = new THREE.MeshBasicMaterial({ color: 0xffffff });
@@ -168,6 +183,21 @@ function setFlash(rig, on) {
     if (on) { if (!o.userData.baseMat) o.userData.baseMat = o.material; o.material = FLASH; }
     else if (o.userData.baseMat) o.material = o.userData.baseMat;
   });
+}
+
+// empurrão: soma o impulso, mas a velocidade final nunca passa do maior
+// impulso envolvido (nem de maxSpeed); golpes em sequência não empilham
+function addImpulse(o, dir, imp) {
+  const vx = o.kvx + dir.x * imp, vz = o.kvz + dir.z * imp;
+  const cap = Math.min(COMBAT.knockback.maxSpeed, Math.max(Math.hypot(o.kvx, o.kvz), imp));
+  const l = Math.hypot(vx, vz), k = l > cap ? cap / l : 1;
+  o.kvx = vx * k; o.kvz = vz * k;
+}
+// scale < 1 = superarmadura segurando o golpe: pose mais contida e sem atordoar
+function setReaction(o, kind, scale = 1) {
+  const R = COMBAT.reaction[kind];
+  o.react = { kind, t: 0, dur: R.dur, amount: R.amount * scale, side: rand() < 0.5 ? -1 : 1 };
+  if (scale >= 1) o.stun = Math.max(o.stun || 0, R.stun);
 }
 
 function gainXp(n) {
@@ -183,47 +213,53 @@ function gainXp(n) {
 
 // ---------------------------------------------------------- golpes do herói
 const HIT_KIND = { skeleton: 'bone', lord: 'bone', wolf: 'flesh' };
-const ATK_PARAMS = {
-  slashA: { mul: 1, range: 2.4, arc: 0.15, knock: 3.5, stop: 0.06, shake: 0.22 },
-  slashB: { mul: 1, range: 2.4, arc: 0.15, knock: 3.5, stop: 0.06, shake: 0.22 },
-  finisher: { mul: 1.7, range: 2.6, arc: 0.45, knock: 7, stop: 0.1, shake: 0.4 },
-  heavy: { mul: 2.6, range: 3.1, arc: -1, knock: 10, stop: 0.14, shake: 0.7 },
-};
 const COMBO = ['slashA', 'slashB', 'finisher'];
 const HEAVY_CD = 3.5, DODGE_CD = 0.8;
 
-function damageEnemy(e, type, dir) {
-  const A = ATK_PARAMS[type];
-  let d = Math.round(ri(player.dmg[0], player.dmg[1]) * A.mul);
-  const crit = rand() < (type === 'heavy' ? 0.22 : 0.12); if (crit) d *= 2;
+// aplica um golpe do herói em um inimigo; `contact` = ponto onde a lâmina encostou
+function damageEnemy(e, type, dir, contact) {
+  const A = COMBAT.attacks[type], C = COMBAT.crit, ET = COMBAT.enemies[e.type];
+  const crit = rand() < (A.category === 'heavy' ? C.heavyChance : C.chance);
+  const d = Math.round(ri(player.dmg[0], player.dmg[1]) * A.mul * (crit ? C.mul : 1));
   e.hp -= d;
-  e.flash = 0.09; setFlash(e.rig, true);
-  // reação: chefes (poise) só cambaleiam com golpes fortes
-  const poise = e.t.poise || 0;
-  if (type === 'heavy' || type === 'finisher' || poise === 0) {
-    e.react = 1; e.reactSide = rand() < 0.5 ? -1 : 1;
-    if (e.atk && e.atk.t < e.t.atkHit) { e.atk = null; e.cd = Math.max(e.cd, 0.7); }   // interrompe o ataque
-  }
-  const kb = A.knock * (1 - poise * 0.8) * (e.type === 'wolf' ? 1.3 : 1);
-  e.kvx += dir.x * kb; e.kvz += dir.z * kb;
   if (e.state === 'idle' || e.state === 'return') e.state = 'chase';
 
-  const y = groundY(e.x, e.z) + (e.type === 'lord' ? 1.8 : 1.1), hx = e.x - dir.x * 0.3, hz = e.z - dir.z * 0.3;
-  if (HIT_KIND[e.type] === 'bone') {
-    fx.burst(hx, y, hz, { n: 10, color: 0xe8e0c8, speed: 3, life: 0.5, dir, spread: 0.8 });
-    fx.burst(hx, y, hz, { n: 8, color: 0x9fc0ff, speed: 6, up: 1, life: 0.25, grav: 4 });
-  } else {
-    fx.burst(hx, y - 0.4, hz, { n: 16, color: 0x8a0e0e, speed: 3.5, up: 2, life: 0.6, grav: 14, dir, spread: 0.9 });
+  // postura: acumula dano até quebrar e cambalear
+  e.poiseT = 0;
+  e.poise -= A.poiseDmg * (crit ? C.poiseMul : 1);
+  addImpulse(e, dir, A.force * (crit ? C.forceMul : 1) / ET.mass);
+  const windup = e.atk && !e.atk.done;
+  let kind = crit ? 'crit' : A.category === 'heavy' ? 'heavy' : ET.superArmor ? 'armored' : 'light';
+  if (e.poise <= 0 && e.hp > 0) {
+    e.poise = ET.poise; e.stagger = e.staggerMax = COMBAT.reaction.stagger.dur;
+    e.atk = null; e.cd = Math.max(e.cd, COMBAT.reaction.stagger.dur * 0.6);
+    if (kind === 'light' || kind === 'armored') kind = 'heavy';
+    floatText('cambaleia', e.x, groundY(e.x, e.z) + (e.type === 'lord' ? 3.4 : 2.3), e.z, 'info');
+  } else if (windup && !ET.superArmor && kind !== 'light') {
+    e.atk = null; e.cd = Math.max(e.cd, COMBAT.reaction.interruptCd);   // golpe forte interrompe a preparação
   }
-  fx.ring(hx, y, hz, { color: crit ? 0xffd070 : 0xbfd4ff, size: crit ? 2.4 : 1.5 });
+  setReaction(e, kind, ET.superArmor && e.stagger <= 0 ? COMBAT.reaction.armorScale : 1);
+
+  // feedback no ponto de contato
+  e.flash = 0.09; setFlash(e.rig, true);
+  const { x: hx, y: hy, z: hz } = contact;
+  if (HIT_KIND[e.type] === 'bone') {
+    fx.burst(hx, hy, hz, { n: 10, color: 0xe8e0c8, speed: 3, life: 0.5, dir, spread: 0.8 });
+    fx.burst(hx, hy, hz, { n: 8, color: 0x9fc0ff, speed: 6, up: 1, life: 0.25, grav: 4 });
+  } else {
+    fx.burst(hx, hy - 0.2, hz, { n: 16, color: 0x8a0e0e, speed: 3.5, up: 2, life: 0.6, grav: 14, dir, spread: 0.9 });
+  }
+  fx.ring(hx, hy, hz, { color: crit ? 0xffd070 : 0xbfd4ff, size: crit ? 2.4 : 1.5 });
   sfx.hit(HIT_KIND[e.type], crit);
-  floatText(crit ? `${d}!` : String(d), e.x, y + 0.9, e.z, crit ? 'crit' : 'dmg');
-  if (e.hp <= 0) killEnemy(e, dir, type);
-  return crit;
+  floatText(crit ? `${d}!` : String(d), e.x, hy + 0.9, e.z, crit ? 'crit' : 'dmg');
+
+  const killed = e.hp <= 0;
+  if (killed) killEnemy(e, dir, type);
+  return { crit, killed };
 }
 
 function killEnemy(e, dir = { x: 0, z: 0 }, type = 'slashA') {
-  e.dead = true; e.deadT = 0; e.state = 'dead'; e.atk = null;
+  e.dead = true; e.deadT = 0; e.state = 'dead'; e.atk = null; e.react = null; e.stagger = 0;
   setFlash(e.rig, false);
   if (player.attackTarget === e) player.attackTarget = null;
   const gy = groundY(e.x, e.z);
@@ -235,7 +271,6 @@ function killEnemy(e, dir = { x: 0, z: 0 }, type = 'slashA') {
     sfx.shatter();
   } else sfx.yelp();
   if (e.type === 'lord') {
-    freeze(0.25); addTrauma(0.9); feel.slowmo = 1.2;
     fx.ring(e.x, gy + 0.1, e.z, { color: 0x70ff9a, size: 9, life: 0.6, ground: true });
     fx.burst(e.x, gy + 1.5, e.z, { n: 80, color: 0x70ff9a, speed: 7, life: 1.2, grav: 2 });
   }
@@ -291,27 +326,52 @@ function dodge(dir) {
   sfx.dodge();
   fx.burst(p.x, groundY(p.x, p.z) + 0.1, p.z, { n: 10, color: 0x6a6a7a, speed: 2, up: 0.5, life: 0.5, grav: 1 });
 }
+
+// ponto mais próximo do segmento a-b em relação a c
+const _seg = new THREE.Vector3(), _cen = new THREE.Vector3();
+function closestOnSegment(a, b, c, out) {
+  _seg.subVectors(b, a);
+  const t = clamp(_cen.subVectors(c, a).dot(_seg) / Math.max(_seg.lengthSq(), 1e-6), 0, 1);
+  return out.copy(a).addScaledVector(_seg, t);
+}
+
 function resolvePlayerHit(type) {
-  const A = ATK_PARAMS[type], p = player, f = facing();
-  let hits = 0, crit = false;
-  const cx = type === 'heavy' ? p.x + f.x * 1.4 : p.x, cz = type === 'heavy' ? p.z + f.z * 1.4 : p.z;
+  const A = COMBAT.attacks[type], p = player, f = facing(), rig = p.rig;
+  // posição da lâmina neste instante: os efeitos nascem onde ela encosta
+  rig.root.updateMatrixWorld(true);
+  const tip = rig.sword.localToWorld(trailA.copy(rig.swordTip)), mid = rig.sword.localToWorld(trailB.copy(rig.swordMid));
+  const heavy = type === 'heavy';
+  const cx = heavy ? p.x + f.x * A.offset : p.x, cz = heavy ? p.z + f.z * A.offset : p.z;
+  const victims = [];
+  let crit = false, kills = 0, bossKill = false;
   for (const e of enemies) {
     if (e.dead) continue;
     const rad = e.t.radius || 0;
-    if (type === 'heavy') { if (Math.hypot(e.x - cx, e.z - cz) > 2.0 + rad) continue; }
+    if (heavy) { if (Math.hypot(e.x - cx, e.z - cz) > A.radius + rad) continue; }
     else {
       const ex = e.x - p.x, ez = e.z - p.z, de = Math.hypot(ex, ez);
       if (de > A.range + rad || (ex * f.x + ez * f.z) / (de || 1) < A.arc) continue;
     }
-    crit = damageEnemy(e, type, dirTo(e.x, e.z)) || crit; hits++;
+    const gy = groundY(e.x, e.z), torso = e.type === 'lord' ? 1.8 : e.type === 'wolf' ? 0.7 : 1.15;
+    _cen.set(e.x, gy + torso, e.z);
+    const contact = heavy ? new THREE.Vector3(e.x, gy + torso * 0.7, e.z)
+      : closestOnSegment(mid, tip, _cen, new THREE.Vector3()).lerp(_cen, 0.45);
+    const r = damageEnemy(e, type, dirTo(e.x, e.z), contact);
+    victims.push(e); crit = crit || r.crit;
+    if (r.killed) { kills++; if (e.type === 'lord') bossKill = true; }
   }
-  if (type === 'heavy') {
+  if (heavy) {
     const gy = groundY(cx, cz);
     fx.ring(cx, gy + 0.08, cz, { color: 0xbfd4ff, size: 5, life: 0.4, ground: true });
     fx.burst(cx, gy + 0.1, cz, { n: 30, color: 0x7a7a88, speed: 5, up: 2.5, life: 0.7, grav: 8 });
     fx.burst(cx, gy + 0.2, cz, { n: 16, color: 0x9fc0ff, speed: 7, up: 3, life: 0.35, grav: 10 });
-    sfx.heavyImpact(); addTrauma(0.55); freeze(hits ? A.stop : 0.05);
-  } else if (hits) { freeze(A.stop + (crit ? 0.05 : 0)); addTrauma(A.shake + (crit ? 0.15 : 0)); }
+    sfx.heavyImpact();
+    if (!victims.length) addTrauma(COMBAT.shake.heavyMiss);
+  }
+  if (victims.length) {
+    hitstop(bossKill ? 'bossKill' : crit ? 'crit' : kills ? 'kill' : A.category, [p, ...victims]);
+    addTrauma(COMBAT.shake[A.category] + (crit ? COMBAT.shake.crit : 0) + (kills ? COMBAT.shake.kill : 0));
+  }
 }
 
 // ---------------------------------------------------------- golpes dos inimigos
@@ -329,14 +389,16 @@ function enemyStrike(e) {
   hurtPlayer(e);
 }
 function hurtPlayer(e) {
-  const d = ri(...e.t.dmg);
+  const d = ri(...e.t.dmg), ET = COMBAT.enemies[e.type], heavy = e.type === 'lord';
   player.hp -= d;
-  const dx = player.x - e.x, dz = player.z - e.z, l = Math.hypot(dx, dz) || 1, kb = e.type === 'lord' ? 7 : 3.5;
-  player.kvx += dx / l * kb; player.kvz += dz / l * kb;
-  player.react = 1;
-  feel.hurtFlash = 1; addTrauma(e.type === 'lord' ? 0.65 : 0.35); freeze(0.05);
+  const dx = player.x - e.x, dz = player.z - e.z, l = Math.hypot(dx, dz) || 1;
+  addImpulse(player, { x: dx / l, z: dz / l }, ET.hitForce);
+  setReaction(player, heavy ? 'heavy' : 'light');
+  player.stun = 0;   // o herói nunca fica preso numa reação: só a pose muda
+  hitstop(heavy ? 'playerHurtHeavy' : 'playerHurt', [player, e]);
+  feel.hurtFlash = 1; addTrauma(COMBAT.shake[heavy ? 'playerHurtHeavy' : 'playerHurt']);
   const y = groundY(player.x, player.z) + 1.3;
-  fx.burst(player.x, y, player.z, { n: 12, color: 0xffc070, speed: 5, life: 0.3, grav: 6 });
+  fx.burst(player.x - dx / l * 0.3, y, player.z - dz / l * 0.3, { n: 12, color: 0xffc070, speed: 5, life: 0.3, grav: 6 });
   sfx.hurt();
   floatText('-' + d, player.x, y + 0.9, player.z, 'hurt');
   if (player.hp <= 0 && !player.dead) {
@@ -461,7 +523,7 @@ function updatePlayer(dt, time) {
     rig.root.rotation.x = -Math.min(Math.PI / 2, p.deadT * 3);
     if (p.deadT > 3) {
       p.dead = false; p.hp = p.maxHp; p.x = SPAWN.x; p.z = SPAWN.z; rig.root.rotation.x = 0;
-      p.kvx = p.kvz = 0; p.react = 0;
+      p.kvx = p.kvz = 0; p.react = null;
       $('death').style.display = 'none';
       for (const e of enemies) if (!e.dead) e.state = 'return';
       updateHud();
@@ -471,10 +533,10 @@ function updatePlayer(dt, time) {
   }
   p.heavyCd = Math.max(0, p.heavyCd - dt); p.dodgeCd = Math.max(0, p.dodgeCd - dt);
   p.invuln = Math.max(0, p.invuln - dt); p.comboTimer = Math.max(0, p.comboTimer - dt);
-  p.react = Math.max(0, p.react - dt * 3.5);
+  if (p.react && (p.react.t += dt / p.react.dur) >= 1) p.react = null;
   if (Math.abs(p.kvx) + Math.abs(p.kvz) > 0.02) {
     moveEntity(p, p.kvx * dt, p.kvz * dt, 0.35);
-    const k = Math.exp(-9 * dt); p.kvx *= k; p.kvz *= k;
+    const k = Math.exp(-COMBAT.knockback.decay * dt); p.kvx *= k; p.kvz *= k;
   }
 
   let moving = false;
@@ -551,10 +613,17 @@ function updatePlayer(dt, time) {
   rig.root.position.set(p.x, groundY(p.x, p.z), p.z);
   rig.root.rotation.y = p.rot;
   const a = p.act;
-  poseHumanoid(rig, { phase: p.phase, move: p.moveAmt, time, react: p.react,
+  poseHumanoid(rig, { phase: p.phase, move: p.moveAmt, time,
+    react: p.react ? p.react.t : -1, reactKind: p.react?.kind, reactAmount: p.react?.amount, reactSide: p.react?.side,
     attack: a && a.kind === 'attack' ? Math.min(1, a.t) : -1, attackType: a ? a.type : undefined,
     dodge: a && a.kind === 'dodge' ? Math.min(1, a.t) : -1 });
   animateCape(rig, a && a.kind === 'dodge' ? 1 : p.moveAmt, time);
+}
+
+// parâmetros de reação/cambaleio para as funções de pose
+function reactPose(o) {
+  return { react: o.react ? Math.min(1, o.react.t) : -1, reactKind: o.react?.kind, reactAmount: o.react?.amount,
+    reactSide: o.react?.side, stagger: o.stagger > 0 ? 1 - o.stagger / o.staggerMax : -1 };
 }
 
 function updateEnemy(e, dt, time) {
@@ -569,17 +638,20 @@ function updateEnemy(e, dt, time) {
     }
     if (e.deadT > t.respawn) {
       if (e.shattered) { scene.remove(e.rig.root); e.rig = t.make(); scene.add(e.rig.root); e.shattered = false; }
-      Object.assign(e, { dead: false, hp: t.hp, x: e.sx, z: e.sz, state: 'idle', react: 0, kvx: 0, kvz: 0, atk: null });
+      Object.assign(e, { dead: false, hp: t.hp, x: e.sx, z: e.sz, state: 'idle', react: null, stun: 0, stagger: 0,
+        kvx: 0, kvz: 0, atk: null, poise: COMBAT.enemies[e.type].poise });
       e.rig.root.rotation.set(0, 0, 0); e.rig.root.visible = true;
     }
     return;
   }
-  const root = e.rig.root, rad = t.radius || 0.4;
-  e.cd = Math.max(0, e.cd - dt); e.react = Math.max(0, e.react - dt * 3);
+  const root = e.rig.root, rad = t.radius || 0.4, ET = COMBAT.enemies[e.type];
+  e.cd = Math.max(0, e.cd - dt); e.stun = Math.max(0, e.stun - dt); e.stagger = Math.max(0, e.stagger - dt);
+  if (e.react && (e.react.t += dt / e.react.dur) >= 1) e.react = null;
+  if ((e.poiseT += dt) > COMBAT.poiseRegenDelay) e.poise = Math.min(ET.poise, e.poise + ET.poiseRegen * dt);
   if (e.flash > 0) { e.flash -= dt; if (e.flash <= 0) setFlash(e.rig, false); }
   if (Math.abs(e.kvx) + Math.abs(e.kvz) > 0.02) {
     moveEntity(e, e.kvx * dt, e.kvz * dt, rad);
-    const k = Math.exp(-7 * dt); e.kvx *= k; e.kvz *= k;
+    const k = Math.exp(-COMBAT.knockback.decay * dt); e.kvx *= k; e.kvz *= k;
   }
   const dp = Math.hypot(player.x - e.x, player.z - e.z), dh = Math.hypot(e.sx - e.x, e.sz - e.z);
   let moving = false;
@@ -591,8 +663,8 @@ function updateEnemy(e, dt, time) {
     if (!e.atk.done && e.atk.t >= t.atkHit) { e.atk.done = true; enemyStrike(e); }
     if (e.atk && e.atk.t < t.atkHit) faceTo(e, player.x, player.z, dt, 4);   // mira devagar durante a preparação
     if (e.atk && e.atk.t >= 1) e.atk = null;
-  } else if (e.react > 0.35) {
-    // cambaleando: não age
+  } else if (e.stun > 0 || e.stagger > 0) {
+    // atordoado pela reação ou com a postura quebrada: não age
   } else if (e.state === 'chase') {
     if (dp > t.reach) moving = moveEntity(e, (player.x - e.x) / dp * sp * dt, (player.z - e.z) / dp * sp * dt, rad);
     else if (e.cd <= 0) { e.cd = t.cd; e.atk = { t: 0, done: false }; }
@@ -623,9 +695,9 @@ function updateEnemy(e, dt, time) {
   root.rotation.y = e.rot;
   const attack = e.atk ? Math.min(1, e.atk.t) : -1;
   if (t.humanoid) {
-    poseHumanoid(e.rig, { phase: e.phase, move: e.moveAmt, attack, time: time + e.sx, jitter: 0.04, react: e.react, reactSide: e.reactSide });
+    poseHumanoid(e.rig, { phase: e.phase, move: e.moveAmt, attack, time: time + e.sx, jitter: 0.04, ...reactPose(e) });
     animateCape(e.rig, e.moveAmt, time);
-  } else poseWolf(e.rig, { phase: e.phase, move: e.moveAmt, attack, time: time + e.sx, react: e.react });
+  } else poseWolf(e.rig, { phase: e.phase, move: e.moveAmt, attack, time: time + e.sx, ...reactPose(e) });
 }
 
 function separate() {
@@ -674,19 +746,22 @@ function frame() {
   const realDt = Math.min(clock.getDelta(), 0.05);
   // hitstop congela o jogo; câmera lenta (morte do chefe) desacelera
   let dt = realDt;
-  if (feel.hitstop > 0) { feel.hitstop -= realDt; dt = 0; }
-  else if (feel.slowmo > 0) { feel.slowmo -= realDt; dt *= 0.35; }
+  feel.globalCd = Math.max(0, feel.globalCd - realDt);
+  if (feel.global > 0) { feel.global -= realDt; dt = 0; }
+  else if (feel.slowmo > 0) { feel.slowmo -= realDt; dt *= COMBAT.hitstop.slowmoScale; }
   gameTime += dt;
   const time = gameTime;
 
   if (started) {
     if (keys.has('q')) camYaw += dt * 1.8;
     if (keys.has('e')) camYaw -= dt * 1.8;
-    updatePlayer(dt, time);
+    // hitstop local: quem participou do impacto fica parado por alguns centésimos
+    const localDt = o => { const d = o.freeze > 0 ? 0 : dt; o.freeze = Math.max(0, o.freeze - realDt); return d; };
+    updatePlayer(localDt(player), time);
     for (const e of enemies) {
       const far = Math.hypot(e.x - player.x, e.z - player.z) > 55;
       e.rig.root.visible = !far && (!e.dead || e.deadT < 4);
-      updateEnemy(e, dt, time);
+      updateEnemy(e, localDt(e), time);
     }
     separate();
     hudTimer += realDt; if (hudTimer > 0.1) { hudTimer = 0; updateHud(); }
@@ -765,6 +840,6 @@ addEventListener('resize', () => {
 });
 
 // ganchos para testes automatizados
-window.__game = { player, enemies, quest, world, requestAttack, heavyAttack, dodge, dirTo, skipIntro: () => { introBlend = 1; }, setCam: (y, d, p) => { camYaw = y; camDist = d; if (p) camPitch = p; } };
+window.__game = { player, enemies, quest, world, feel, COMBAT, requestAttack, heavyAttack, dodge, dirTo, skipIntro: () => { introBlend = 1; }, setCam: (y, d, p) => { camYaw = y; camDist = d; if (p) camPitch = p; } };
 updateHud();
 frame();

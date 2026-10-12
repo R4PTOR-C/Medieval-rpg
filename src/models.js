@@ -420,10 +420,14 @@ function channel(t, frames, ch, base) {
   return kf(t, keys);
 }
 
+// Envelope das reações: "estalo" rápido no começo (12%) e retorno suave.
+const reactEnv = t => t < 0.12 ? t / 0.12 : Math.pow(1 - (t - 0.12) / 0.88, 2);
+
 // st: { phase, move (0..1), attack (-1 ou 0..1), attackType, time, jitter,
-//       react (0..1, reação a golpe), reactSide (-1/1), dodge (-1 ou 0..1) }
+//       react (-1 ou 0..1), reactKind ('light'|'armored'|'heavy'|'crit'), reactAmount, reactSide (-1/1),
+//       stagger (-1 ou 0..1, atordoado), dodge (-1 ou 0..1) }
 export function poseHumanoid(r, { phase = 0, move = 0, attack = -1, attackType = 'overhead', time = 0, jitter = 0,
-  react = 0, reactSide = 1, dodge = -1 }) {
+  react = -1, reactKind = 'light', reactAmount = 1, reactSide = 1, stagger = -1, dodge = -1 }) {
   const s = Math.sin(phase), c = Math.cos(phase), m = move;
   const br = Math.sin(time * 2.2) * 0.02;
   const j = k => jitter ? Math.sin(time * 13 + k * 7.1) * jitter : 0;
@@ -459,15 +463,34 @@ export function poseHumanoid(r, { phase = 0, move = 0, attack = -1, attackType =
   if (v.drop > 0) for (const A of [r.L, r.R]) { A.thigh.rotation.x -= v.drop * 2.2; A.knee.rotation.x += v.drop * 4; }
   if (r.jaw) r.jaw.rotation.x = attack >= 0 ? Math.sin(attack * PI) * 0.5 : 0.05 + Math.abs(Math.sin(time * 9)) * 0.08 * m;
 
-  // reação ao golpe: tronco e cabeça jogados para trás, braços abrem
-  if (react > 0) {
-    const k = Math.sin(react * PI * 0.5);
-    r.spine.rotation.x -= 0.4 * k;
-    r.chest.rotation.y += 0.35 * k * reactSide;
-    r.head.rotation.x -= 0.5 * k;
-    r.R.shoulder.rotation.z += 0.5 * k; r.L.shoulder.rotation.z -= 0.5 * k;
-    r.hips.position.y -= 0.05 * k;
-    if (r.jaw) r.jaw.rotation.x = 0.6 * k;
+  // reação ao golpe: cada categoria tem uma pose própria
+  if (react >= 0) {
+    const e = reactEnv(react) * reactAmount, sd = reactSide;
+    if (reactKind === 'crit') {          // dobra para a frente e torce, como um golpe no estômago
+      r.spine.rotation.x += 0.45 * e; r.chest.rotation.y += 0.7 * e * sd; r.head.rotation.x += 0.35 * e;
+      r.R.shoulder.rotation.x -= 0.5 * e; r.L.shoulder.rotation.x -= 0.5 * e;
+      r.hips.position.y -= 0.08 * e;
+    } else if (reactKind === 'heavy') {  // jogado para trás, braços abertos, um passo atrás
+      r.spine.rotation.x -= 0.55 * e; r.chest.rotation.y += 0.35 * e * sd; r.head.rotation.x -= 0.6 * e;
+      r.R.shoulder.rotation.z += 0.7 * e; r.L.shoulder.rotation.z -= 0.7 * e;
+      r.R.elbow.rotation.x -= 0.5 * e; r.L.elbow.rotation.x -= 0.5 * e;
+      r.L.thigh.rotation.x += 0.45 * e; r.L.knee.rotation.x += 0.3 * e; r.hips.position.y -= 0.06 * e;
+    } else {                             // leve (ou com armadura): estalo curto de cabeça e tronco
+      r.spine.rotation.x -= 0.22 * e; r.head.rotation.x -= 0.35 * e; r.chest.rotation.y += 0.25 * e * sd;
+    }
+    if (r.jaw) r.jaw.rotation.x = Math.max(r.jaw.rotation.x, 0.55 * e);
+  }
+
+  // cambaleio (postura quebrada): curvado, braços pendentes, balançando
+  if (stagger >= 0) {
+    const k = Math.max(0, Math.min(1, stagger / 0.1, (1 - stagger) / 0.15)), sw = Math.sin(time * 6);
+    r.spine.rotation.x += 0.45 * k; r.head.rotation.x += 0.5 * k; r.head.rotation.z = 0.25 * sw * k;
+    r.chest.rotation.z = 0.12 * sw * k; r.hips.rotation.z = -0.06 * sw * k; r.hips.position.y -= 0.08 * k;
+    for (const A of [r.L, r.R]) {
+      A.shoulder.rotation.x *= 1 - k; A.elbow.rotation.x *= 1 - 0.8 * k;
+      A.knee.rotation.x += 0.3 * k; A.thigh.rotation.x -= 0.15 * k;
+    }
+    if (r.jaw) r.jaw.rotation.x = 0.45 * k;
   }
 
   // esquiva: cambalhota para a frente em volta do quadril
@@ -491,22 +514,29 @@ export function animateCape(r, move, time) {
   });
 }
 
-export function poseWolf(w, { phase = 0, move = 0, attack = -1, time = 0, react = 0 }) {
+export function poseWolf(w, { phase = 0, move = 0, attack = -1, time = 0,
+  react = -1, reactKind = 'light', reactAmount = 1, reactSide = 1, stagger = -1 }) {
   const m = move;
-  w.body.position.y = 0.62 + Math.sin(phase * 2) * 0.03 * m + Math.sin(time * 2.5) * 0.008;
-  w.body.rotation.x = attack >= 0 ? kf(attack, [[0, 0], [0.35, 0.25], [0.6, -0.25], [1, 0]]) : Math.sin(phase * 2) * 0.04 * m;
-  w.body.rotation.z = react > 0 ? Math.sin(react * 18) * 0.25 * react : 0;
+  const re = react >= 0 ? reactEnv(react) * reactAmount : 0, hard = reactKind === 'heavy' || reactKind === 'crit';
+  const sk = stagger >= 0 ? Math.max(0, Math.min(1, stagger / 0.1, (1 - stagger) / 0.15)) : 0;
+  w.body.position.y = 0.62 + Math.sin(phase * 2) * 0.03 * m + Math.sin(time * 2.5) * 0.008 - sk * 0.06;
+  w.body.rotation.x = (attack >= 0 ? kf(attack, [[0, 0], [0.35, 0.25], [0.6, -0.25], [1, 0]]) : Math.sin(phase * 2) * 0.04 * m)
+    - (hard ? 0.3 : 0.08) * re;                                   // empina com o impacto
+  w.body.rotation.z = (hard ? 0.35 : 0.15) * re * reactSide + Math.sin(time * 6) * 0.15 * sk;
   w.legs.forEach((L, i) => {
     const off = [0, PI, PI, 0][i], front = i < 2;
     L.hip.rotation.x = Math.sin(phase + off) * 0.6 * m;
+    L.hip.rotation.z = (i % 2 ? 1 : -1) * 0.2 * sk;              // patas abertas quando atordoado
     L.low.rotation.x = (front ? 1 : -0.7) * Math.max(0, Math.cos(phase + off)) * 0.8 * m;
   });
-  w.neck.rotation.x = (attack >= 0 ? kf(attack, [[0, 0], [0.35, -0.25], [0.6, 0.35], [1, 0]]) : 0.1 * m + Math.sin(time * 0.7) * 0.05) - react * 0.5;
+  w.neck.rotation.x = (attack >= 0 ? kf(attack, [[0, 0], [0.35, -0.25], [0.6, 0.35], [1, 0]]) : 0.1 * m + Math.sin(time * 0.7) * 0.05)
+    - (hard ? 0.5 : 0.25) * re + 0.5 * sk;
   w.head.rotation.y = Math.sin(time * 0.5) * 0.25 * (1 - m);
-  w.jaw.rotation.x = attack >= 0 ? kf(attack, [[0, 0.05], [0.35, 0.65], [0.6, 0], [1, 0.05]]) : 0.05 + m * Math.abs(Math.sin(time * 8)) * 0.15 + react * 0.5;
+  w.jaw.rotation.x = attack >= 0 ? kf(attack, [[0, 0.05], [0.35, 0.65], [0.6, 0], [1, 0.05]])
+    : 0.05 + m * Math.abs(Math.sin(time * 8)) * 0.15 + 0.5 * re + 0.3 * sk;
   w.tail.forEach((t, i) => {
     t.rotation.y = Math.sin(time * (m > 0.3 ? 9 : 3) - i) * 0.25;
-    t.rotation.x = (i === 0 ? -0.6 + 0.5 * m : 0.12) - react * 0.4;
+    t.rotation.x = (i === 0 ? -0.6 + 0.5 * m : 0.12) - 0.4 * re - 0.4 * sk;
   });
 }
 
